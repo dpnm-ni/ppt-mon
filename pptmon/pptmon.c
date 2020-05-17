@@ -1,4 +1,3 @@
-#pragma clang diagnostic ignored "-Wtautological-compare"
 #include <uapi/linux/ptrace.h>
 #include <net/sock.h>
 #include <bcc/proto.h>
