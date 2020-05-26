@@ -15,3 +15,5 @@ VNF Packet Processing Time Monitoring
 ```bash
 sudo python3 -m pptmon
 ```
+# Notes
+- Reduce the MSS size in iperf so that there is room to increase/decrease
