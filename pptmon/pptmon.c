@@ -24,7 +24,8 @@
 #include <linux/pkt_cls.h>
 #include <net/checksum.h>
 
-#define TCP_OPT_LEN_WORD_MAX 15
+#define TCP_W_OPT_LEN_WORD_MAX 15
+#define TCP_W_OPT_LEN_WORD_MIN 5
 #define PPT_H_SIZE_WORD 3
 #define PPT_H_SIZE (PPT_H_SIZE_WORD << 2)
 /* use experimental tcp option kind */
@@ -48,6 +49,16 @@
 #define CURSOR_ADVANCE(_target, _cursor, _len,_data_end) \
     ({  _target = _cursor; _cursor += _len; \
         if(_cursor > _data_end) return XDP_DROP; })
+
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+# define htonll(x)	___constant_swab64(x)
+# define ntohll(x)	___constant_swab64(x)
+#elif defined(__BIG_ENDIAN_BITFIELD)
+# define htonll(x) (x)
+# define ntohll(x) (x)
+#else
+#error  "Please fix <asm/byteorder.h>"
+#endif
 
 struct ppt_t
 {
@@ -100,14 +111,14 @@ int mon_ingress(struct __sk_buff *skb)
     struct tcphdr *tcp;
     CURSOR_ADVANCE(tcp, cursor, sizeof(*tcp), data_end);
 
-    /* check tcp option condition */
-    if (tcp->doff > TCP_OPT_LEN_WORD_MAX - PPT_H_SIZE_WORD)
+    /* check if there is enough space */
+    if (tcp->doff > TCP_W_OPT_LEN_WORD_MAX - PPT_H_SIZE_WORD)
         return TC_ACT_OK;
 
     /* ppt header */
     struct ppt_t ppt = {};
     ppt.header = PPT_H_ONLY;
-    ppt.tstamp = skb->tstamp;
+    ppt.tstamp = htonll(bpf_ktime_get_ns());
 
 
     /*  Because after adjust pkt room, all pointers wil be invalid,
@@ -188,15 +199,20 @@ int mon_egress(struct __sk_buff *skb)
 
     struct tcphdr *tcp;
     CURSOR_ADVANCE(tcp, cursor, sizeof(*tcp), data_end);
+    /* check if tcp option exist */
+    if (tcp->doff <= TCP_W_OPT_LEN_WORD_MIN)
+        return TC_ACT_OK;
 
     struct ppt_t *ppt;
     CURSOR_ADVANCE(ppt, cursor, sizeof(*ppt), data_end);
-
     if (ppt->header != PPT_H_ONLY)
         return TC_ACT_OK;
 
 
     /* extract and process ppt data */
+    u64 ppt_time = ntohll(ppt->tstamp);
+    u64 now = bpf_ktime_get_ns();
+    // bpf_trace_printk("[OUT] ppt_time: %llu\n", now - ppt_time);
 
     /* restore original packet data */
     /*  Because after adjust pkt room, all pointers wil be invalid,
@@ -243,7 +259,7 @@ int mon_egress(struct __sk_buff *skb)
     /*  Now we actually remove ppt header.
         bpf_skb_adjust_room allows removing space right after eth header.
         Thus, we move iptcp header right by PPT_H_SIZE, and then remove
-        the space from ETH_H_SIZE to ETH_H_SIZE+PPT_H_SIZE
+        the space from ETH_H_SIZE to ETH_H_SIZE + PPT_H_SIZE
     */
     struct tcphdr tcp_buf = {};
     bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
