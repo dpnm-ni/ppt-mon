@@ -1,5 +1,5 @@
 /*
-    packet processing time (ppt) as tcp option:
+   Packet processing time (ppt) as tcp option:
     0                   1                   2                   3
     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -23,6 +23,14 @@
 #include <linux/in.h>
 #include <linux/pkt_cls.h>
 #include <net/checksum.h>
+#include <linux/version.h>
+
+/* BCC does not accept separated custom header file,
+   so we need to put everything in one file
+ */
+
+#define SAMPLE_PERIOD_NS 1000000000
+#define SUB_SAMPLE_PERIOD_NS (SAMPLE_PERIOD_NS/100)
 
 #define TCP_W_OPT_LEN_WORD_MAX 15
 #define TCP_W_OPT_LEN_WORD_MIN 5
@@ -60,11 +68,19 @@
 #error  "Please fix <asm/byteorder.h>"
 #endif
 
+/* structs */
+
+struct g_vars_t {
+    u64 prev_tstamp;
+};
+
 struct ppt_t
 {
     u32 header;
     u64 tstamp;
 } __attribute__((packed));
+
+/* functions */
 
 static __always_inline u16 incr_csum_replace16(u16 old_csum,
                                       u16 old_val,
@@ -93,8 +109,34 @@ static __always_inline u16 incr_csum_remove32(u16 old_csum, u32 rem_val)
     return incr_csum_add32(old_csum, ~rem_val);
 }
 
+/* BPF maps */
+
+/* Lower kernel versions do not support BPF_F_MMAPABLE */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,5,0)
+BPF_F_TABLE("array", int, struct g_vars_t, tb_g_vars, 1, 0);
+#else
+BPF_F_TABLE("array", int, struct g_vars_t, tb_g_vars, 1, BPF_F_MMAPABLE);
+#endif
+
+BPF_PERF_OUTPUT(ppt_events);
+
+/* main functions */
+
 int mon_ingress(struct __sk_buff *skb)
 {
+    /* check sampling period before doing anything */
+
+    int k = 0;
+
+    struct g_vars_t *g_vars = tb_g_vars.lookup(&k);
+    if (unlikely(!g_vars))
+        return TC_ACT_OK;
+
+    if (skb->tstamp < g_vars->prev_tstamp + SAMPLE_PERIOD_NS)
+        return TC_ACT_OK;
+
+    /* parsing pkt structure */
+
     void* data_end = (void*)(long)skb->data_end;
     void* cursor = (void*)(long)skb->data;
 
@@ -178,6 +220,9 @@ int mon_ingress(struct __sk_buff *skb)
     bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE,
                         &ppt, PPT_H_SIZE, 0);
 
+    /* update g_vars after everything is done */
+    g_vars->prev_tstamp = skb->tstamp;
+
     return TC_ACT_OK;
 }
 
@@ -210,9 +255,8 @@ int mon_egress(struct __sk_buff *skb)
 
 
     /* extract and process ppt data */
-    u64 ppt_time = ntohll(ppt->tstamp);
-    u64 now = bpf_ktime_get_ns();
-    // bpf_trace_printk("[OUT] ppt_time: %llu\n", now - ppt_time);
+    u64 ppt_time = bpf_ktime_get_ns() - ntohll(ppt->tstamp);
+    ppt_events.perf_submit(skb, &ppt_time, sizeof(ppt_time));
 
     /* restore original packet data */
     /*  Because after adjust pkt room, all pointers wil be invalid,
