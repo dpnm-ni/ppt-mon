@@ -29,8 +29,7 @@
    so we need to put everything in one file
  */
 
-#define SAMPLE_PERIOD_NS 1000000000
-#define SUB_SAMPLE_PERIOD_NS (SAMPLE_PERIOD_NS/100)
+#define SAMPLE_PERIOD_NS _PERIOD_NS
 
 #define TCP_W_OPT_LEN_WORD_MAX 15
 #define TCP_W_OPT_LEN_WORD_MIN 5
@@ -74,7 +73,7 @@ struct g_vars_t {
     u64 prev_tstamp;
 };
 
-struct ppt_t
+struct ppthdr
 {
     u32 header;
     u64 tstamp;
@@ -158,7 +157,7 @@ int mon_ingress(struct __sk_buff *skb)
         return TC_ACT_OK;
 
     /* ppt header */
-    struct ppt_t ppt = {};
+    struct ppthdr ppt = {};
     ppt.header = PPT_H_ONLY;
     ppt.tstamp = htonll(bpf_ktime_get_ns());
 
@@ -248,7 +247,7 @@ int mon_egress(struct __sk_buff *skb)
     if (tcp->doff <= TCP_W_OPT_LEN_WORD_MIN)
         return TC_ACT_OK;
 
-    struct ppt_t *ppt;
+    struct ppthdr *ppt;
     CURSOR_ADVANCE(ppt, cursor, sizeof(*ppt), data_end);
     if (ppt->header != PPT_H_ONLY)
         return TC_ACT_OK;
