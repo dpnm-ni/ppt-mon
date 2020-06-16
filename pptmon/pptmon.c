@@ -67,6 +67,7 @@
 #error  "Please fix <asm/byteorder.h>"
 #endif
 
+
 /* structs */
 
 struct g_vars_t {
@@ -108,6 +109,20 @@ static __always_inline u16 incr_csum_remove32(u16 old_csum, u32 rem_val)
     return incr_csum_add32(old_csum, ~rem_val);
 }
 
+static __always_inline u64 get_now_ns(struct __sk_buff *skb)
+{
+    /* skb->tstamp only available after kernel 5.0. Thus for lower kernel
+       version, we use bpf_ktime_get_ns(), which is relative time from boot,
+       and may be more expensive call
+     */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+    return bpf_ktime_get_ns();
+#else
+    return skb->tstamp;
+#endif
+}
+
+
 /* BPF maps */
 
 /* Lower kernel versions do not support BPF_F_MMAPABLE */
@@ -131,7 +146,7 @@ int mon_ingress(struct __sk_buff *skb)
     if (unlikely(!g_vars))
         return TC_ACT_OK;
 
-    if (skb->tstamp < g_vars->prev_tstamp + SAMPLE_PERIOD_NS)
+    if (get_now_ns(skb) < g_vars->prev_tstamp + SAMPLE_PERIOD_NS)
         return TC_ACT_OK;
 
     /* parsing pkt structure */
@@ -220,7 +235,7 @@ int mon_ingress(struct __sk_buff *skb)
                         &ppt, PPT_H_SIZE, 0);
 
     /* update g_vars after everything is done */
-    g_vars->prev_tstamp = skb->tstamp;
+    g_vars->prev_tstamp = get_now_ns(skb);
 
     return TC_ACT_OK;
 }
