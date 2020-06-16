@@ -15,10 +15,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--period", default=1000, type=int,
                         help="samping period [ms]. Default to 1000")
+    parser.add_argument("-i", "--inif", default="ens4",
+                        help="packet in interface. Default to ens4")
+    parser.add_argument("-o", "--outif", default="ens4",
+                        help="packet out interface. Default to ens4")
     args = parser.parse_args()
 
     ipr = IPRoute()
-    iface = 'ens4'
 
     bpf_mon = BPF(src_file="pptmon.c", debug=0,
                   cflags=["-w",
@@ -27,19 +30,22 @@ def main():
     fn_mon_egress = bpf_mon.load_func("mon_egress", BPF.SCHED_CLS)
     ppt_events = bpf_mon.get_table("ppt_events")
 
-    if_idx = ipr.link_lookup(ifname=iface)[0]
-    ipr.tc("add", "clsact", if_idx)
+    inif_idx = ipr.link_lookup(ifname=args.inif)[0]
+    outif_idx = ipr.link_lookup(ifname=args.outif)[0]
+    ipr.tc("add", "clsact", inif_idx)
+    if (outif_idx != inif_idx):
+        ipr.tc("add", "clsact", outif_idx)
 
     # tc parent params for ingress and egress are taken from
     # sched_clsact.py example file in pyroute2
 
     # ingress traffic
-    ipr.tc("add-filter", "bpf", if_idx, ":1", fd=fn_mon_ingress.fd,
+    ipr.tc("add-filter", "bpf", inif_idx, ":1", fd=fn_mon_ingress.fd,
             name=fn_mon_ingress.name, parent="ffff:fff2",
             direct_action=True)
 
     # egress traffic
-    ipr.tc("add-filter", "bpf", if_idx, ":1", fd=fn_mon_egress.fd,
+    ipr.tc("add-filter", "bpf", outif_idx, ":1", fd=fn_mon_egress.fd,
             name=fn_mon_egress.name, parent="ffff:fff3",
             direct_action=True)
 
@@ -56,4 +62,6 @@ def main():
         pass
 
     finally:
-        ipr.tc("del", "clsact", if_idx)
+        ipr.tc("del", "clsact", inif_idx)
+        if (outif_idx != inif_idx):
+            ipr.tc("del", "clsact", outif_idx)
