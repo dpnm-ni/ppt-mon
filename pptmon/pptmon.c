@@ -209,7 +209,7 @@ int mon_ingress(struct __sk_buff *skb)
     /* tcplen pseudo header */
     u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
     u16 new_tcplen = htons(ntohs(new_ip_tlen) - (ip->ihl << 2));
-    csum = incr_csum_replace16(csum, old_ip_tlen, new_ip_tlen);
+    csum = incr_csum_replace16(csum, old_tcplen, new_tcplen);
 
     /* checksum with new ppt */
     csum = incr_csum_add32(csum, PPT_H_ONLY);
@@ -305,7 +305,7 @@ int mon_egress(struct __sk_buff *skb)
     /* tcplen pseudo header */
     u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
     u16 new_tcplen = htons(ntohs(new_ip_tlen) - (ip->ihl << 2));
-    csum = incr_csum_replace16(csum, old_ip_tlen, new_ip_tlen);
+    csum = incr_csum_replace16(csum, old_tcplen, new_tcplen);
 
     /* checksum when remove ppt */
     csum = incr_csum_remove32(csum, PPT_H_ONLY);
