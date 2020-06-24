@@ -55,7 +55,7 @@
 
 #define CURSOR_ADVANCE(_target, _cursor, _len,_data_end) \
     ({  _target = _cursor; _cursor += _len; \
-        if(_cursor > _data_end) return XDP_DROP; })
+        if(_cursor > _data_end) return TC_ACT_OK; })
 
 #if defined(__LITTLE_ENDIAN_BITFIELD)
 # define htonll(x)	___constant_swab64(x)
