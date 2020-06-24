@@ -30,9 +30,11 @@
  */
 
 #define SAMPLE_PERIOD_NS _PERIOD_NS
+#define IS_PPT_IN_PAYLOAD _IS_PPT_IN_PAYLOAD
 
 #define TCP_W_OPT_LEN_WORD_MAX 15
 #define TCP_W_OPT_LEN_WORD_MIN 5
+#define TCP_OPT_LEN_WORD_MAX (TCP_W_OPT_LEN_WORD_MAX - TCP_W_OPT_LEN_WORD_MIN)
 #define PPT_H_SIZE_WORD 3
 #define PPT_H_SIZE (PPT_H_SIZE_WORD << 2)
 /* use experimental tcp option kind */
@@ -40,6 +42,7 @@
 /* network byte order */
 #define PPT_H_EXID 0x0000
 #define PPT_H_ONLY (PPT_H_KIND | PPT_H_SIZE << 8 | PPT_H_EXID << 16)
+// #define PPT_H_ONLY 0xf0f0f0f0
 
 #define ETH_H_SIZE sizeof(struct ethhdr)
 #define IP_H_SIZE sizeof(struct iphdr)
@@ -55,6 +58,10 @@
 
 #define CURSOR_ADVANCE(_target, _cursor, _len,_data_end) \
     ({  _target = _cursor; _cursor += _len; \
+        if(_cursor > _data_end) return TC_ACT_OK; })
+
+#define CURSOR_ADVANCE_NO_PARSE(_cursor, _len,_data_end) \
+    ({ _cursor += _len; \
         if(_cursor > _data_end) return TC_ACT_OK; })
 
 #if defined(__LITTLE_ENDIAN_BITFIELD)
@@ -134,12 +141,12 @@ BPF_F_TABLE("array", int, struct g_vars_t, tb_g_vars, 1, BPF_F_MMAPABLE);
 
 BPF_PERF_OUTPUT(ppt_events);
 
+/**********************************************************************/
 /* main functions */
 
 int mon_ingress(struct __sk_buff *skb)
 {
     /* check sampling period before doing anything */
-
     int k = 0;
 
     struct g_vars_t *g_vars = tb_g_vars.lookup(&k);
@@ -171,11 +178,18 @@ int mon_ingress(struct __sk_buff *skb)
     if (tcp->doff > TCP_W_OPT_LEN_WORD_MAX - PPT_H_SIZE_WORD)
         return TC_ACT_OK;
 
+/* if packet has no data (e.g., init SYN pkt), then ppt in payload
+   will not work. See: stackoverflow.com/q/37994131
+ */
+#if IS_PPT_IN_PAYLOAD != 0
+    if (ntohs(ip->tot_len) == ((ip->ihl + tcp->doff) << 2)) {
+        return TC_ACT_OK;
+    }
+#endif
     /* ppt header */
     struct ppthdr ppt = {};
     ppt.header = PPT_H_ONLY;
     ppt.tstamp = htonll(bpf_ktime_get_ns());
-
 
     /*  Because after adjust pkt room, all pointers wil be invalid,
         we need to update ip and tcp header prior
@@ -186,11 +200,24 @@ int mon_ingress(struct __sk_buff *skb)
     ip->tot_len = new_ip_tlen;
     ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
-    /* update TCP header len & checksum */
+
+    /* update TCP header len & checksum
+       TCP checksum: tcp hdr, pseudo hdr, tcp payload
+       tcp->doff is not changed if ppt in payload
+     */
+    u16 csum = tcp->check;
+    /* tcplen pseudo header */
+    u16 old_tcplen = htons(ntohs(old_ip_tlen) - ((ip->ihl) << 2));
+    u16 new_tcplen = htons(ntohs(new_ip_tlen) - ((ip->ihl) << 2));
+    csum = incr_csum_replace16(csum, old_tcplen, new_tcplen);
+    /* checksum with new ppt */
+    csum = incr_csum_add32(csum, PPT_H_ONLY);
+    csum = incr_csum_add32(csum, ppt.tstamp & 0xffffffff);
+    csum = incr_csum_add32(csum, ppt.tstamp >> 32);
+#if IS_PPT_IN_PAYLOAD == 0
     /* because offset is only 4 bits, we need to expand to 2 bytes
        for checksum calculation, which include offset, reseved, flags
      */
-    u16 csum = tcp->check;
     u16 old_off2flag, new_off2flag;
     bpf_skb_load_bytes(skb,
                        TCP_OFFSET_OFF,
@@ -205,17 +232,7 @@ int mon_ingress(struct __sk_buff *skb)
                        sizeof(new_off2flag));
 
     csum = incr_csum_replace16(csum, old_off2flag, new_off2flag);
-
-    /* tcplen pseudo header */
-    u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
-    u16 new_tcplen = htons(ntohs(new_ip_tlen) - (ip->ihl << 2));
-    csum = incr_csum_replace16(csum, old_tcplen, new_tcplen);
-
-    /* checksum with new ppt */
-    csum = incr_csum_add32(csum, PPT_H_ONLY);
-    csum = incr_csum_add32(csum, ppt.tstamp & 0xffffffff);
-    csum = incr_csum_add32(csum, ppt.tstamp >> 32);
-
+#endif
     tcp->check = csum;
 
     /*  Now we actually create space to add ppt header.
@@ -224,6 +241,7 @@ int mon_ingress(struct __sk_buff *skb)
         Thus, we create space right before IP header (which is supported),
         then move the IP and TCP (w/o option) header back to correct position
     */
+#if IS_PPT_IN_PAYLOAD == 0
     struct tcphdr tcp_buf = {};
     bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                        &tcp_buf, TCP_H_SIZE);
@@ -233,6 +251,34 @@ int mon_ingress(struct __sk_buff *skb)
     /* add PPT header to the new created space */
     bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE,
                         &ppt, PPT_H_SIZE, 0);
+#else
+    struct tcphdr tcp_buf = {};
+    u8 opt_size_word = (u8)(tcp->doff) - (u8)(TCP_H_SIZE>>2);
+    u32 tcp_opts[TCP_OPT_LEN_WORD_MAX] = {};
+    bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
+                       &tcp_buf, TCP_H_SIZE);
+    #pragma unroll
+    for(int i = 0; i < opt_size_word && i < TCP_OPT_LEN_WORD_MAX; i++) {
+        bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + \
+                           TCP_H_SIZE + (i<<2), \
+                           &tcp_opts[i], sizeof(tcp_opts[i]));
+    }
+    bpf_skb_adjust_room(skb, PPT_H_SIZE, BPF_ADJ_ROOM_NET, 0);
+    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
+                        &tcp_buf, TCP_H_SIZE, 0);
+    #pragma unroll
+    for(int i = 0; i < opt_size_word && i < TCP_OPT_LEN_WORD_MAX; i++) {
+        bpf_skb_store_bytes(skb, \
+                            ETH_H_SIZE + IP_H_SIZE + \
+                            TCP_H_SIZE + (i<<2), \
+                            &tcp_opts[i], \
+                            sizeof(tcp_opts[i]), 0);
+    }
+    /* add PPT header to the new created space */
+    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + \
+                        TCP_H_SIZE + (opt_size_word<<2),
+                        &ppt, PPT_H_SIZE, 0);
+#endif
 
     /* update g_vars after everything is done */
     g_vars->prev_tstamp = get_now_ns(skb);
@@ -240,6 +286,7 @@ int mon_ingress(struct __sk_buff *skb)
     return TC_ACT_OK;
 }
 
+/**********************************************************************/
 
 int mon_egress(struct __sk_buff *skb)
 {
@@ -261,12 +308,19 @@ int mon_egress(struct __sk_buff *skb)
     /* check if tcp option exist */
     if (tcp->doff <= TCP_W_OPT_LEN_WORD_MIN)
         return TC_ACT_OK;
-
+#if IS_PPT_IN_PAYLOAD == 0
     struct ppthdr *ppt;
     CURSOR_ADVANCE(ppt, cursor, sizeof(*ppt), data_end);
     if (ppt->header != PPT_H_ONLY)
         return TC_ACT_OK;
-
+#else
+    u8 option_size = (u8)(tcp->doff<<2) - (u8)(TCP_H_SIZE);
+    CURSOR_ADVANCE_NO_PARSE(cursor, option_size, data_end);
+    struct ppthdr *ppt;
+    CURSOR_ADVANCE(ppt, cursor, sizeof(*ppt), data_end);
+    if (ppt->header != PPT_H_ONLY)
+        return TC_ACT_OK;
+#endif
 
     /* extract and process ppt data */
     u64 ppt_time = bpf_ktime_get_ns() - ntohll(ppt->tstamp);
@@ -282,11 +336,24 @@ int mon_egress(struct __sk_buff *skb)
     ip->tot_len = new_ip_tlen;
     ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
-    /* update TCP header len & checksum */
+    /* update TCP header len & checksum
+       TCP checksum: tcp hdr, pseudo hdr, tcp payload
+       tcp->doff is not changed if ppt in payload
+     */
+    u16 csum = tcp->check;
+    /* tcplen pseudo header */
+    u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
+    u16 new_tcplen = htons(ntohs(new_ip_tlen) - (ip->ihl << 2));
+    csum = incr_csum_replace16(csum, old_tcplen, new_tcplen);
+
+    /* checksum when remove ppt */
+    csum = incr_csum_remove32(csum, PPT_H_ONLY);
+    csum = incr_csum_remove32(csum, ppt->tstamp & 0xffffffff);
+    csum = incr_csum_remove32(csum, ppt->tstamp >> 32);
+#if IS_PPT_IN_PAYLOAD == 0
     /* because offset is only 4 bits, we need to expand to 2 bytes
        for checksum calculation, which include offset, reseved, flags
      */
-    u16 csum = tcp->check;
     u16 old_off2flag, new_off2flag;
     bpf_skb_load_bytes(skb,
                        TCP_OFFSET_OFF,
@@ -299,19 +366,8 @@ int mon_egress(struct __sk_buff *skb)
                        TCP_OFFSET_OFF,
                        &new_off2flag,
                        sizeof(new_off2flag));
-
     csum = incr_csum_replace16(csum, old_off2flag, new_off2flag);
-
-    /* tcplen pseudo header */
-    u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
-    u16 new_tcplen = htons(ntohs(new_ip_tlen) - (ip->ihl << 2));
-    csum = incr_csum_replace16(csum, old_tcplen, new_tcplen);
-
-    /* checksum when remove ppt */
-    csum = incr_csum_remove32(csum, PPT_H_ONLY);
-    csum = incr_csum_remove32(csum, ppt->tstamp & 0xffffffff);
-    csum = incr_csum_remove32(csum, ppt->tstamp >> 32);
-
+#endif
     tcp->check = csum;
 
     /*  Now we actually remove ppt header.
@@ -319,12 +375,36 @@ int mon_egress(struct __sk_buff *skb)
         Thus, we move iptcp header right by PPT_H_SIZE, and then remove
         the space from ETH_H_SIZE to ETH_H_SIZE + PPT_H_SIZE
     */
+#if IS_PPT_IN_PAYLOAD == 0
     struct tcphdr tcp_buf = {};
     bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                        &tcp_buf, TCP_H_SIZE);
     bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + PPT_H_SIZE,
                         &tcp_buf, TCP_H_SIZE, 0);
     bpf_skb_adjust_room(skb, -PPT_H_SIZE, BPF_ADJ_ROOM_NET, 0);
-
+#else
+    struct tcphdr tcp_buf = {};
+    u8 opt_size_word = (u8)(tcp->doff) - (u8)(TCP_H_SIZE>>2);
+    u32 tcp_opts[TCP_OPT_LEN_WORD_MAX] = {};
+    bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
+                       &tcp_buf, TCP_H_SIZE);
+    #pragma unroll
+    for(int i = 0; i < opt_size_word && i < TCP_OPT_LEN_WORD_MAX; i++) {
+        bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + \
+                           TCP_H_SIZE + (i<<2), \
+                           &tcp_opts[i], sizeof(tcp_opts[i]));
+    }
+    bpf_skb_adjust_room(skb, -PPT_H_SIZE, BPF_ADJ_ROOM_NET, 0);
+    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
+                        &tcp_buf, TCP_H_SIZE, 0);
+    #pragma unroll
+    for(int i = 0; i < opt_size_word && i < TCP_OPT_LEN_WORD_MAX; i++) {
+        tcp_opts[i] = bpf_skb_store_bytes(skb, \
+                                          ETH_H_SIZE + IP_H_SIZE + \
+                                          TCP_H_SIZE + (i<<2), \
+                                          &tcp_opts[i], \
+                                          sizeof(tcp_opts[i]), 0);
+    }
+#endif
     return TC_ACT_OK;
 }

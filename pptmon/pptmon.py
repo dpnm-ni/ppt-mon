@@ -15,6 +15,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--period", default=1000, type=int,
                         help="samping period [ms]. Default to 1000")
+    parser.add_argument("-P", "--pptpayload", type=int, default=0,
+                        help="packet in interface. Default to ens4")
     parser.add_argument("-i", "--inif", default="ens4",
                         help="packet in interface. Default to ens4")
     parser.add_argument("-o", "--outif", default="ens4",
@@ -25,6 +27,7 @@ def main():
 
     bpf_mon = BPF(src_file="pptmon.c", debug=0,
                   cflags=["-w",
+                          "-D_IS_PPT_IN_PAYLOAD=%d" % (args.pptpayload),
                           "-D_PERIOD_NS=%d" % (args.period*1000000)])
     fn_mon_ingress = bpf_mon.load_func("mon_ingress", BPF.SCHED_CLS)
     fn_mon_egress = bpf_mon.load_func("mon_egress", BPF.SCHED_CLS)
