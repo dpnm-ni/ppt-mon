@@ -322,9 +322,9 @@ int mon_egress(struct __sk_buff *skb)
     struct tcphdr tcp_buf = {};
     bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                        &tcp_buf, TCP_H_SIZE);
-    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + PPT_H_SIZE,
-                        &tcp_buf, TCP_H_SIZE, 0);
     bpf_skb_adjust_room(skb, -PPT_H_SIZE, BPF_ADJ_ROOM_NET, 0);
+    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
+                        &tcp_buf, TCP_H_SIZE, 0);
 
     return TC_ACT_OK;
 }
