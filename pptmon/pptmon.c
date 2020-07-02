@@ -183,16 +183,13 @@ int mon_ingress(struct __sk_buff *skb)
    will not work. See: stackoverflow.com/q/37994131
  */
 #if IS_PPT_IN_PAYLOAD != 0
-    if (ntohs(ip->tot_len) == ((ip->ihl + tcp->doff) << 2)) {
-        bpf_trace_printk("[IN] no ppt\n");
+    if (ntohs(ip->tot_len) == ((ip->ihl + tcp->doff) << 2))
         return TC_ACT_OK;
-    }
 #endif
     /* ppt header */
     struct ppthdr ppt = {};
     ppt.header = PPT_H_ONLY;
     ppt.tstamp = bpf_ktime_get_ns();
-    bpf_trace_printk("[IN]: %llx\n", ppt.tstamp);
 
     /*  Because after adjust pkt room, all pointers wil be invalid,
         we need to update ip and tcp header prior
@@ -261,27 +258,21 @@ int mon_ingress(struct __sk_buff *skb)
     bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                        &tcp_buf, TCP_H_SIZE);
 
-    u8 tmp = opt_size_word;
-    #pragma unroll
-    for(int i = 0; i < TCP_OPT_LEN_WORD_MAX; i++) {
+    for(int i = 0; i < opt_size_word && i < TCP_OPT_LEN_WORD_MAX; i++) {
         bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + \
                            TCP_H_SIZE + (i<<2), \
                            &tcp_opts[i], sizeof(tcp_opts[i]));
-        if (tmp-- <= 0) break;
     }
     bpf_skb_adjust_room(skb, PPT_H_SIZE, BPF_ADJ_ROOM_NET, 0);
     bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                         &tcp_buf, TCP_H_SIZE, 0);
 
-    tmp = opt_size_word;
-    #pragma unroll
-    for(int i = 0; i < TCP_OPT_LEN_WORD_MAX; i++) {
+    for(int i = 0; i < opt_size_word && i < TCP_OPT_LEN_WORD_MAX; i++) {
         bpf_skb_store_bytes(skb, \
                             ETH_H_SIZE + IP_H_SIZE + \
                             TCP_H_SIZE + (i<<2), \
                             &tcp_opts[i], \
                             sizeof(tcp_opts[i]), 0);
-        if (tmp-- <= 0) break;
     }
     /* add PPT header to the new created space */
     bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + \
@@ -317,6 +308,7 @@ int mon_egress(struct __sk_buff *skb)
     /* check if tcp option exist */
     if (tcp->doff <= TCP_W_OPT_LEN_WORD_MIN)
         return TC_ACT_OK;
+
 #if IS_PPT_IN_PAYLOAD == 0
     struct ppthdr *ppt;
     CURSOR_ADVANCE(ppt, cursor, sizeof(*ppt), data_end);
@@ -337,8 +329,7 @@ int mon_egress(struct __sk_buff *skb)
         return TC_ACT_OK;
     u64 tmp1 = htonl(load_word(skb, ppt_offset + 4));
     u64 tmp2 = htonl(load_word(skb, ppt_offset + 8));
-    ppt->tstamp = tmp2 << 32 | tmp1 & 0xffffffff;
-    bpf_trace_printk("[OUT] %llx %llx %llx\n", tmp1, tmp2, ppt->tstamp);
+    ppt->tstamp = tmp2 << 32 | tmp1;
 #endif
 
     /* extract and process ppt data */
@@ -388,7 +379,7 @@ int mon_egress(struct __sk_buff *skb)
     csum = incr_csum_replace16(csum, old_off2flag, new_off2flag);
 #endif
     tcp->check = csum;
-    bpf_trace_printk("[OUT] final csum %x seq %d\n", tcp->check, tcp->seq);
+    bpf_trace_printk("[OUT] csum: %x\n", csum);
 
     /*  Now we actually remove ppt header.
         bpf_skb_adjust_room allows removing space right after eth header.
@@ -399,9 +390,9 @@ int mon_egress(struct __sk_buff *skb)
     struct tcphdr tcp_buf = {};
     bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                        &tcp_buf, TCP_H_SIZE);
-    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + PPT_H_SIZE,
-                        &tcp_buf, TCP_H_SIZE, 0);
     bpf_skb_adjust_room(skb, -PPT_H_SIZE, BPF_ADJ_ROOM_NET, 0);
+    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
+                        &tcp_buf, TCP_H_SIZE, 0);
 #else
     struct tcphdr tcp_buf = {};
     u8 opt_size_word = (u8)(tcp->doff) - (u8)(TCP_H_SIZE>>2);
@@ -410,27 +401,22 @@ int mon_egress(struct __sk_buff *skb)
                        &tcp_buf, TCP_H_SIZE);
 
     u8 tmp = opt_size_word;
-    #pragma unroll
-    for(int i = 0; i < TCP_OPT_LEN_WORD_MAX; i++) {
+    for(int i = 0; i < opt_size_word && i < TCP_OPT_LEN_WORD_MAX; i++) {
         bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + \
                            TCP_H_SIZE + (i<<2), \
                            &tcp_opts[i], sizeof(tcp_opts[i]));
-        if (tmp-- <= 0) break;
     }
     bpf_skb_adjust_room(skb, -PPT_H_SIZE, BPF_ADJ_ROOM_NET, 0);
     bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                         &tcp_buf, TCP_H_SIZE, 0);
 
-    tmp = opt_size_word;
-    #pragma unroll
-    for(int i = 0; i < TCP_OPT_LEN_WORD_MAX; i++) {
-        tcp_opts[i] = bpf_skb_store_bytes(skb, \
-                                          ETH_H_SIZE + IP_H_SIZE + \
-                                          TCP_H_SIZE + (i<<2), \
-                                          &tcp_opts[i], \
-                                          sizeof(tcp_opts[i]), 0);
-        if (tmp-- <= 0) break;
+    for(int i = 0; i < opt_size_word && i < TCP_OPT_LEN_WORD_MAX; i++) {
+        bpf_skb_store_bytes(skb, \
+                            ETH_H_SIZE + IP_H_SIZE + \
+                            TCP_H_SIZE + (i<<2), \
+                            &tcp_opts[i], \
+                            sizeof(tcp_opts[i]), 0);
     }
 #endif
-    return TC_ACT_OK;
+    return TC_ACT_PIPE;
 }

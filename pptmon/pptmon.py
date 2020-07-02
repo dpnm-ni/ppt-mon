@@ -50,7 +50,7 @@ def main():
     # egress traffic
     ipr.tc("add-filter", "bpf", outif_idx, ":1", fd=fn_mon_egress.fd,
             name=fn_mon_egress.name, parent="ffff:fff3",
-            direct_action=True)
+            direct_action=False, action="drop")
 
     ppt_events.open_perf_buffer(ppt_event_handler, page_cnt=512)
 
