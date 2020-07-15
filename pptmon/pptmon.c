@@ -1,14 +1,16 @@
 /*
    Packet processing time (ppt) as tcp option:
+   new VNF info is inserted in the front
     0                   1                   2                   3
     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
    |                      TCP header (w/o option)                  |
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   | PPT_H_KIND    | PPT_H_SIZE    |          PPT_H_EXID           |
+   | PPT_H_KIND    | PPT_H_LEN     |          PPT_H_EXID           |
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                           TSTAMP                              |
-   |                                                               |
+   | VNF_ID_1      |                      TSTAMP                   |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   | VNF_ID_0      |                      TSTAMP                   |
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
    |                Original Options               |    Padding    |
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -30,16 +32,18 @@
  */
 
 #define SAMPLE_PERIOD_NS _PERIOD_NS
+#define MODE_SINK_ONLY _SINK_ONLY
+#define VNF_ID _VNF_ID
+#define MAX_PPT_DATA _MAX_PPT_DATA
+
 
 #define TCP_W_OPT_LEN_WORD_MAX 15
 #define TCP_W_OPT_LEN_WORD_MIN 5
-#define PPT_H_SIZE_WORD 3
-#define PPT_H_SIZE (PPT_H_SIZE_WORD << 2)
 /* use experimental tcp option kind */
 #define PPT_H_KIND 254
+/* ppt header with one timestamp */
 /* network byte order */
 #define PPT_H_EXID 0x0000
-#define PPT_H_ONLY (PPT_H_KIND | PPT_H_SIZE << 8 | PPT_H_EXID << 16)
 
 #define ETH_H_SIZE sizeof(struct ethhdr)
 #define IP_H_SIZE sizeof(struct iphdr)
@@ -74,10 +78,17 @@ struct g_vars_t {
     u64 prev_tstamp;
 };
 
-struct ppthdr
+struct ppt_data_t {
+    u8 vnf_id;
+    u32 tstamp:24;
+} __attribute__((packed));
+
+struct ppt_hdr_t
 {
-    u32 header;
-    u64 tstamp;
+    // u32 header;
+    u8 kind;
+    u8 hlen;
+    u16 exid;
 } __attribute__((packed));
 
 /* functions */
@@ -89,6 +100,19 @@ static __always_inline u16 incr_csum_replace16(u16 old_csum,
     old_csum = ~old_csum;
     old_val = ~old_val;
     sum = (u32)old_csum + old_val + new_val;
+    sum = (sum & 0xffff) + (sum >> 16);
+    sum += (sum >> 16);
+    return (u16)(~sum & 0xffff);
+}
+
+static __always_inline u16 incr_csum_replace32(u16 old_csum,
+                                      u32 old_val,
+                                      u32 new_val){
+    u32 sum;
+    old_csum = ~(old_csum);
+    old_val = ~(old_val);
+    sum = (u32)old_csum + (old_val >> 16) + (old_val & 0xffff)
+          + (new_val >> 16) + (new_val & 0xffff);
     sum = (sum & 0xffff) + (sum >> 16);
     sum += (sum >> 16);
     return (u16)(~sum & 0xffff);
@@ -122,6 +146,18 @@ static __always_inline u64 get_now_ns(struct __sk_buff *skb)
 #endif
 }
 
+static __always_inline u64 get_pptime(u32 old_ktime)
+{
+    u32 ktime_now = bpf_ktime_get_ns()/1000 & 0xffffff;
+    /* because ktime count from the os booted, and ppt tstamp is only 24 bit,
+       it can be overflowed. Assume that packet processing time
+       will not > 2^24 us ~= 16s, if tstamp_now < tstamp, then it
+       is atually overflowed 1 time
+    */
+    if (ktime_now < old_ktime)
+        ktime_now += 0x1000000;
+    return ktime_now - old_ktime;
+}
 
 /* BPF maps */
 
@@ -136,7 +172,7 @@ BPF_PERF_OUTPUT(ppt_events);
 
 /* main functions */
 
-int mon_ingress(struct __sk_buff *skb)
+int ppt_source(struct __sk_buff *skb)
 {
     /* check sampling period before doing anything */
 
@@ -168,21 +204,26 @@ int mon_ingress(struct __sk_buff *skb)
     CURSOR_ADVANCE(tcp, cursor, sizeof(*tcp), data_end);
 
     /* check if there is enough space */
-    if (tcp->doff > TCP_W_OPT_LEN_WORD_MAX - PPT_H_SIZE_WORD)
+    if (tcp->doff > TCP_W_OPT_LEN_WORD_MAX -
+        ((sizeof(struct ppt_hdr_t) + sizeof(struct ppt_data_t)) >> 2))
         return TC_ACT_OK;
 
     /* ppt header */
-    struct ppthdr ppt = {};
-    ppt.header = PPT_H_ONLY;
-    ppt.tstamp = htonll(bpf_ktime_get_ns());
+    struct ppt_hdr_t ppt_hdr = {};
+    struct ppt_data_t ppt_data = {};
+    ppt_hdr.kind = PPT_H_KIND;
+    ppt_hdr.hlen = sizeof(ppt_hdr) + sizeof(ppt_data);
+    ppt_hdr.exid = PPT_H_EXID;
+    ppt_data.vnf_id = VNF_ID;
 
+    ppt_data.tstamp = bpf_ktime_get_ns()/1000 & 0xffffff;
 
     /*  Because after adjust pkt room, all pointers wil be invalid,
         we need to update ip and tcp header prior
      */
     /* update IP header & checksum */
     u16 old_ip_tlen = ip->tot_len;
-    u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + (PPT_H_SIZE));
+    u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + sizeof(ppt_hdr) + sizeof(ppt_data));
     ip->tot_len = new_ip_tlen;
     ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
@@ -197,7 +238,7 @@ int mon_ingress(struct __sk_buff *skb)
                        &old_off2flag,
                        sizeof(old_off2flag));
 
-    tcp->doff = tcp->doff + (PPT_H_SIZE_WORD);
+    tcp->doff = tcp->doff + ((sizeof(ppt_hdr) + sizeof(ppt_data)) >> 2);
 
     bpf_skb_load_bytes(skb,
                        TCP_OFFSET_OFF,
@@ -212,9 +253,8 @@ int mon_ingress(struct __sk_buff *skb)
     csum = incr_csum_replace16(csum, old_tcplen, new_tcplen);
 
     /* checksum with new ppt */
-    csum = incr_csum_add32(csum, PPT_H_ONLY);
-    csum = incr_csum_add32(csum, ppt.tstamp & 0xffffffff);
-    csum = incr_csum_add32(csum, ppt.tstamp >> 32);
+    csum = incr_csum_add32(csum, (PPT_H_KIND | ppt_hdr.hlen << 8 | PPT_H_EXID << 16));
+    csum = incr_csum_add32(csum, ppt_data.vnf_id | (ppt_data.tstamp << 8));
 
     tcp->check = csum;
 
@@ -227,12 +267,14 @@ int mon_ingress(struct __sk_buff *skb)
     struct tcphdr tcp_buf = {};
     bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                        &tcp_buf, TCP_H_SIZE);
-    bpf_skb_adjust_room(skb, PPT_H_SIZE, BPF_ADJ_ROOM_NET, 0);
+    bpf_skb_adjust_room(skb, sizeof(ppt_hdr) + sizeof(ppt_data), BPF_ADJ_ROOM_NET, 0);
     bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                         &tcp_buf, TCP_H_SIZE, 0);
     /* add PPT header to the new created space */
     bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE,
-                        &ppt, PPT_H_SIZE, 0);
+                        &ppt_hdr, sizeof(ppt_hdr), 0);
+    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE + sizeof(ppt_hdr),
+                        &ppt_data, sizeof(ppt_data), 0);
 
     /* update g_vars after everything is done */
     g_vars->prev_tstamp = get_now_ns(skb);
@@ -240,8 +282,8 @@ int mon_ingress(struct __sk_buff *skb)
     return TC_ACT_OK;
 }
 
-
-int mon_egress(struct __sk_buff *skb)
+/* add ppt header if is packet is already has ppt */
+int ppt_transit_ingress(struct __sk_buff *skb)
 {
     void* data_end = (void*)(long)skb->data_end;
     void* cursor = (void*)(long)skb->data;
@@ -262,23 +304,23 @@ int mon_egress(struct __sk_buff *skb)
     if (tcp->doff <= TCP_W_OPT_LEN_WORD_MIN)
         return TC_ACT_OK;
 
-    struct ppthdr *ppt;
-    CURSOR_ADVANCE(ppt, cursor, sizeof(*ppt), data_end);
-    if (ppt->header != PPT_H_ONLY)
+    struct ppt_hdr_t *ppt_hdr;
+    CURSOR_ADVANCE(ppt_hdr, cursor, sizeof(*ppt_hdr), data_end);
+    if (ppt_hdr->kind != PPT_H_KIND || ppt_hdr->exid != PPT_H_EXID)
         return TC_ACT_OK;
 
+    /* TODO: check if remaining space in tcp option is enough */
 
-    /* extract and process ppt data */
-    u64 ppt_time = bpf_ktime_get_ns() - ntohll(ppt->tstamp);
-    ppt_events.perf_submit(skb, &ppt_time, sizeof(ppt_time));
+    struct ppt_data_t ppt_data = {};
+    ppt_data.vnf_id = VNF_ID;
+    ppt_data.tstamp = bpf_ktime_get_ns()/1000 & 0xffffff;;
 
-    /* restore original packet data */
     /*  Because after adjust pkt room, all pointers wil be invalid,
         we need to update ip and tcp header prior
      */
     /* update IP header & checksum */
     u16 old_ip_tlen = ip->tot_len;
-    u16 new_ip_tlen = htons(ntohs(old_ip_tlen) - (PPT_H_SIZE));
+    u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + (sizeof(ppt_data)));
     ip->tot_len = new_ip_tlen;
     ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
@@ -293,7 +335,158 @@ int mon_egress(struct __sk_buff *skb)
                        &old_off2flag,
                        sizeof(old_off2flag));
 
-    tcp->doff = tcp->doff - (PPT_H_SIZE_WORD);
+    tcp->doff = tcp->doff + (sizeof(ppt_data) >> 2);
+
+    bpf_skb_load_bytes(skb,
+                       TCP_OFFSET_OFF,
+                       &new_off2flag,
+                       sizeof(new_off2flag));
+
+    csum = incr_csum_replace16(csum, old_off2flag, new_off2flag);
+
+    /* tcplen pseudo header */
+    u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
+    u16 new_tcplen = htons(ntohs(new_ip_tlen) - (ip->ihl << 2));
+    csum = incr_csum_replace16(csum, old_tcplen, new_tcplen);
+
+    /* checksum with new ppt timestamp */
+    csum = incr_csum_add32(csum, ppt_data.vnf_id | (ppt_data.tstamp << 8));
+
+    /* increase ppt hlen and update csum with new ppt hlen*/
+    u8 new_ppt_hlen = ppt_hdr->hlen + sizeof(ppt_data);
+    csum = incr_csum_replace16(csum,
+                               PPT_H_KIND | (ppt_hdr->hlen << 8),
+                               PPT_H_KIND | (new_ppt_hlen << 8));
+    ppt_hdr->hlen = new_ppt_hlen;
+
+    tcp->check = csum;
+
+    /*  Now we actually create space to add ppt header.
+        We want to create space right after TCP header and before TCP option,
+        which bpf_skb_adjust_room does not support yet.
+        Thus, we create space right before IP header (which is supported),
+        then move the IP and TCP (w/o option) header back to correct position
+    */
+    struct tcphdr tcp_buf = {};
+    struct ppt_hdr_t __ppt_hdr = {};
+    bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
+                       &tcp_buf, TCP_H_SIZE);
+    bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE,
+                       &__ppt_hdr, sizeof(__ppt_hdr));
+    bpf_skb_adjust_room(skb, sizeof(ppt_data), BPF_ADJ_ROOM_NET, 0);
+    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
+                        &tcp_buf, TCP_H_SIZE, 0);
+    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE,
+                        &__ppt_hdr, sizeof(__ppt_hdr), 0);
+    /* add PPT header to the new created space */
+    bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE + sizeof(__ppt_hdr),
+                        &ppt_data, sizeof(ppt_data), 0);
+
+    return TC_ACT_OK;
+}
+
+/* replace tstamp with packet processing time */
+int ppt_transit_egress(struct __sk_buff *skb)
+{
+    void* data_end = (void*)(long)skb->data_end;
+    void* cursor = (void*)(long)skb->data;
+
+    struct ethhdr *eth;
+    CURSOR_ADVANCE(eth, cursor, sizeof(*eth), data_end);
+    if (ntohs(eth->h_proto) != ETH_P_IP)
+        return TC_ACT_OK;
+
+    struct iphdr *ip;
+    CURSOR_ADVANCE(ip, cursor, sizeof(*ip), data_end);
+    if (ip->protocol != IPPROTO_TCP)
+        return TC_ACT_OK;
+
+    struct tcphdr *tcp;
+    CURSOR_ADVANCE(tcp, cursor, sizeof(*tcp), data_end);
+    /* check if tcp option exist */
+    if (tcp->doff <= TCP_W_OPT_LEN_WORD_MIN)
+        return TC_ACT_OK;
+
+    struct ppt_hdr_t *ppt_hdr;
+    CURSOR_ADVANCE(ppt_hdr, cursor, sizeof(*ppt_hdr), data_end);
+    if (ppt_hdr->kind != PPT_H_KIND || ppt_hdr->exid != PPT_H_EXID)
+        return TC_ACT_OK;
+
+    struct ppt_data_t *ppt_data;
+    CURSOR_ADVANCE(ppt_data, cursor, sizeof(*ppt_data), data_end);
+
+    /* replace tstamp with actual pptime */
+    u32 pptime = get_pptime(ppt_data->tstamp);
+    /* checksum with new ppt timestamp */
+
+    tcp->check = incr_csum_replace32(tcp->check,
+                                     ppt_data->vnf_id | (ppt_data->tstamp << 8),
+                                     ppt_data->vnf_id | (pptime << 8));
+    ppt_data->tstamp = pptime;
+
+    return TC_ACT_OK;
+}
+
+int ppt_sink(struct __sk_buff *skb)
+{
+    void* data_end = (void*)(long)skb->data_end;
+    void* cursor = (void*)(long)skb->data;
+
+    struct ethhdr *eth;
+    CURSOR_ADVANCE(eth, cursor, sizeof(*eth), data_end);
+    if (ntohs(eth->h_proto) != ETH_P_IP)
+        return TC_ACT_OK;
+
+    struct iphdr *ip;
+    CURSOR_ADVANCE(ip, cursor, sizeof(*ip), data_end);
+    if (ip->protocol != IPPROTO_TCP)
+        return TC_ACT_OK;
+
+    struct tcphdr *tcp;
+    CURSOR_ADVANCE(tcp, cursor, sizeof(*tcp), data_end);
+    /* check if tcp option exist */
+    if (tcp->doff <= TCP_W_OPT_LEN_WORD_MIN)
+        return TC_ACT_OK;
+
+    struct ppt_hdr_t *ppt_hdr;
+    CURSOR_ADVANCE(ppt_hdr, cursor, sizeof(*ppt_hdr), data_end);
+    if (ppt_hdr->kind != PPT_H_KIND || ppt_hdr->exid != PPT_H_EXID)
+        return TC_ACT_OK;
+
+    /* '>> 2' should be '/sizeof(struct ppt_data_t)'.
+       but the division is costly (is it optimized by compiler?)
+     */
+    u8 num_ppt_data = (ppt_hdr->hlen - sizeof(*ppt_hdr)) >> 2;
+
+    struct ppt_data_t *ppt_data;
+    struct ppt_data_t ppt_data_arr[MAX_PPT_DATA] = {0};
+    for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
+        CURSOR_ADVANCE(ppt_data, cursor, sizeof(*ppt_data), data_end);
+        ppt_data_arr[i] = *ppt_data;
+    }
+
+    /* restore original packet data */
+    /*  Because after adjust pkt room, all pointers wil be invalid,
+        we need to update ip and tcp header prior
+     */
+    /* update IP header & checksum */
+    u16 old_ip_tlen = ip->tot_len;
+    u16 new_ip_tlen = htons(ntohs(old_ip_tlen) - ppt_hdr->hlen);
+    ip->tot_len = new_ip_tlen;
+    ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
+
+    /* update TCP header len & checksum */
+    /* because offset is only 4 bits, we need to expand to 2 bytes
+       for checksum calculation, which include offset, reseved, flags
+     */
+    u16 csum = tcp->check;
+    u16 old_off2flag, new_off2flag;
+    bpf_skb_load_bytes(skb,
+                       TCP_OFFSET_OFF,
+                       &old_off2flag,
+                       sizeof(old_off2flag));
+
+    tcp->doff = tcp->doff - (ppt_hdr->hlen >> 2);
 
     bpf_skb_load_bytes(skb,
                        TCP_OFFSET_OFF,
@@ -308,11 +501,21 @@ int mon_egress(struct __sk_buff *skb)
     csum = incr_csum_replace16(csum, old_tcplen, new_tcplen);
 
     /* checksum when remove ppt */
-    csum = incr_csum_remove32(csum, PPT_H_ONLY);
-    csum = incr_csum_remove32(csum, ppt->tstamp & 0xffffffff);
-    csum = incr_csum_remove32(csum, ppt->tstamp >> 32);
-
+    csum = incr_csum_remove32(csum,
+                              ((u32) ppt_hdr->kind) |
+                              ((u32) ppt_hdr->hlen) << 8 |
+                              ((u32) ppt_hdr->exid) << 16);
+    for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
+        csum = incr_csum_remove32(csum, (ppt_data_arr[i].vnf_id | (ppt_data_arr[i].tstamp << 8)));
+    }
     tcp->check = csum;
+
+    /* get the actual pptime for the newest (this) VNF
+       we do this after csum recalculation because the first ppt_data tstamp
+       is modified before submitted to userspace
+    */
+    ppt_data_arr[0].tstamp = get_pptime(ppt_data_arr[0].tstamp);
+    ppt_events.perf_submit(skb, &(ppt_data_arr[0]), sizeof(ppt_data_arr[0]) * MAX_PPT_DATA);
 
     /*  Now we actually remove ppt header.
         bpf_skb_adjust_room allows removing space right after eth header.
@@ -322,7 +525,7 @@ int mon_egress(struct __sk_buff *skb)
     struct tcphdr tcp_buf = {};
     bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                        &tcp_buf, TCP_H_SIZE);
-    bpf_skb_adjust_room(skb, -PPT_H_SIZE, BPF_ADJ_ROOM_NET, 0);
+    bpf_skb_adjust_room(skb, -(ppt_hdr->hlen), BPF_ADJ_ROOM_NET, 0);
     bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                         &tcp_buf, TCP_H_SIZE, 0);
 
