@@ -159,6 +159,27 @@ static __always_inline u64 get_pptime(u32 old_ktime)
     return ktime_now - old_ktime;
 }
 
+static __always_inline u8 tcp_doff_csum_update(struct __sk_buff *skb,
+                                               u16 *csum, u8 doff,
+                                               u8 doff_added)
+{
+    /* update TCP header len & checksum */
+    /* because offset is only 4 bits, we need to expand to 2 bytes
+       for checksum calculation, which include offset, reseved, flags
+     */
+    u16 old_off2flag, new_off2flag;
+    bpf_skb_load_bytes(skb,
+                       TCP_OFFSET_OFF,
+                       &old_off2flag,
+                       sizeof(old_off2flag));
+
+    doff = doff + doff_added;
+    new_off2flag = htons((ntohs(old_off2flag) & 0xfff) | (doff << 12));
+    *csum = incr_csum_replace16(*csum, old_off2flag, new_off2flag);
+
+    return doff;
+}
+
 /* BPF maps */
 
 /* Lower kernel versions do not support BPF_F_MMAPABLE */
@@ -228,24 +249,9 @@ int ppt_source(struct __sk_buff *skb)
     ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
     /* update TCP header len & checksum */
-    /* because offset is only 4 bits, we need to expand to 2 bytes
-       for checksum calculation, which include offset, reseved, flags
-     */
     u16 csum = tcp->check;
-    u16 old_off2flag, new_off2flag;
-    bpf_skb_load_bytes(skb,
-                       TCP_OFFSET_OFF,
-                       &old_off2flag,
-                       sizeof(old_off2flag));
-
-    tcp->doff = tcp->doff + ((sizeof(ppt_hdr) + sizeof(ppt_data)) >> 2);
-
-    bpf_skb_load_bytes(skb,
-                       TCP_OFFSET_OFF,
-                       &new_off2flag,
-                       sizeof(new_off2flag));
-
-    csum = incr_csum_replace16(csum, old_off2flag, new_off2flag);
+    tcp->doff = tcp_doff_csum_update(skb, &csum, tcp->doff,
+                                     (sizeof(ppt_hdr) + sizeof(ppt_data)) >> 2);
 
     /* tcplen pseudo header */
     u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
@@ -325,25 +331,9 @@ int ppt_transit_ingress(struct __sk_buff *skb)
     ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
     /* update TCP header len & checksum */
-    /* because offset is only 4 bits, we need to expand to 2 bytes
-       for checksum calculation, which include offset, reseved, flags
-     */
     u16 csum = tcp->check;
-    u16 old_off2flag, new_off2flag;
-    bpf_skb_load_bytes(skb,
-                       TCP_OFFSET_OFF,
-                       &old_off2flag,
-                       sizeof(old_off2flag));
-
-    tcp->doff = tcp->doff + (sizeof(ppt_data) >> 2);
-
-    bpf_skb_load_bytes(skb,
-                       TCP_OFFSET_OFF,
-                       &new_off2flag,
-                       sizeof(new_off2flag));
-
-    csum = incr_csum_replace16(csum, old_off2flag, new_off2flag);
-
+    tcp->doff = tcp_doff_csum_update(skb, &csum, tcp->doff,
+                                     sizeof(ppt_data) >> 2);
     /* tcplen pseudo header */
     u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
     u16 new_tcplen = htons(ntohs(new_ip_tlen) - (ip->ihl << 2));
@@ -476,25 +466,9 @@ int ppt_sink(struct __sk_buff *skb)
     ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
     /* update TCP header len & checksum */
-    /* because offset is only 4 bits, we need to expand to 2 bytes
-       for checksum calculation, which include offset, reseved, flags
-     */
     u16 csum = tcp->check;
-    u16 old_off2flag, new_off2flag;
-    bpf_skb_load_bytes(skb,
-                       TCP_OFFSET_OFF,
-                       &old_off2flag,
-                       sizeof(old_off2flag));
-
-    tcp->doff = tcp->doff - (ppt_hdr->hlen >> 2);
-
-    bpf_skb_load_bytes(skb,
-                       TCP_OFFSET_OFF,
-                       &new_off2flag,
-                       sizeof(new_off2flag));
-
-    csum = incr_csum_replace16(csum, old_off2flag, new_off2flag);
-
+    tcp->doff = tcp_doff_csum_update(skb, &csum, tcp->doff,
+                                     -(ppt_hdr->hlen >> 2));
     /* tcplen pseudo header */
     u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
     u16 new_tcplen = htons(ntohs(new_ip_tlen) - (ip->ihl << 2));
