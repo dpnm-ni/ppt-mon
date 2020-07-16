@@ -58,9 +58,11 @@
 #define TCP_OFFSET_OFF (ETH_H_SIZE + IP_H_SIZE + 12)
 #define PPT_OFF (ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE)
 
+
 #define CURSOR_ADVANCE(_target, _cursor, _len,_data_end) \
     ({  _target = _cursor; _cursor += _len; \
         if(_cursor > _data_end) return TC_ACT_OK; })
+
 
 #if defined(__LITTLE_ENDIAN_BITFIELD)
 # define htonll(x)	___constant_swab64(x)
@@ -298,14 +300,12 @@ int ppt_source(struct __sk_buff *skb)
 
         ppt_data.tstamp = bpf_ktime_get_ns()/1000 & 0xffffff;
 
-        /*  Because after adjust pkt room, all pointers wil be invalid,
-            we need to update ip and tcp header prior
-        */
         /* update IP header & checksum */
         u16 old_ip_tlen = ip->tot_len;
         u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + sizeof(ppt_hdr) + sizeof(ppt_data));
         ip->tot_len = new_ip_tlen;
         ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
+
         /* add PPT header and data to the end of udp packet */
         u16 udp_len = ntohs(udp->len);
         bpf_skb_change_tail(skb, ETH_H_SIZE + ntohs(new_ip_tlen), 0);
@@ -353,9 +353,6 @@ int ppt_transit_ingress(struct __sk_buff *skb)
         ppt_data.vnf_id = VNF_ID;
         ppt_data.tstamp = bpf_ktime_get_ns()/1000 & 0xffffff;;
 
-        /*  Because after adjust pkt room, all pointers wil be invalid,
-            we need to update ip and tcp header prior
-        */
         /* update IP header & checksum */
         u16 old_ip_tlen = ip->tot_len;
         u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + (sizeof(ppt_data)));
@@ -538,9 +535,6 @@ int ppt_sink(struct __sk_buff *skb)
         }
 
         /* restore original packet data */
-        /*  Because after adjust pkt room, all pointers wil be invalid,
-            we need to update ip and tcp header prior
-        */
         /* update IP header & checksum */
         u16 old_ip_tlen = ip->tot_len;
         u16 new_ip_tlen = htons(ntohs(old_ip_tlen) - ppt_hdr->hlen);
@@ -573,11 +567,7 @@ int ppt_sink(struct __sk_buff *skb)
         ppt_data_arr[0].tstamp = get_pptime(ppt_data_arr[0].tstamp);
         ppt_events.perf_submit(skb, &(ppt_data_arr[0]), sizeof(ppt_data_arr[0]) * MAX_PPT_DATA);
 
-        /*  Now we actually remove ppt header.
-            bpf_skb_adjust_room allows removing space right after eth header.
-            Thus, we move iptcp header right by PPT_H_SIZE, and then remove
-            the space from ETH_H_SIZE to ETH_H_SIZE + PPT_H_SIZE
-        */
+        /*  Now we actually remove ppt header */
         struct tcphdr tcp_buf = {};
         bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                         &tcp_buf, TCP_H_SIZE);
@@ -602,9 +592,8 @@ int ppt_sink(struct __sk_buff *skb)
 
         struct ppt_data_t ppt_data_arr[MAX_PPT_DATA] = {0};
         for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
-            /* because in case of UDP, newest vnf goes to last, thus we store ppt data from
-               tail of the array so the user space receive the data in the same order of the
-               tcp case.
+            /* because in case of UDP, newest vnf goes to last, thus we read data from back
+               so the user space receive the data in the same order of the tcp case.
                << 2 here means * sizeof(struct ppt_data_t)
              */
             bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + ntohs(udp->len) +
