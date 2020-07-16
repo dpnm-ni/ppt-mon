@@ -46,10 +46,6 @@
 /* network byte order */
 #define PPT_H_EXID 0x0000
 
-#define ETH_H_SIZE sizeof(struct ethhdr)
-#define IP_H_SIZE sizeof(struct iphdr)
-#define TCP_H_SIZE sizeof(struct tcphdr)
-
 #define offset_of(TYPE, MEMBER) ((size_t) & ((TYPE *)0)->MEMBER)
 #define IP_CSUM_OFF (ETH_H_SIZE + \
                      offset_of(struct iphdr, check))
@@ -81,11 +77,6 @@ struct g_vars_t {
     u64 prev_tstamp;
 };
 
-struct ppt_data_t {
-    u8 vnf_id;
-    u32 tstamp:24;
-} __attribute__((packed));
-
 struct ppt_hdr_t
 {
     // u32 header;
@@ -93,6 +84,18 @@ struct ppt_hdr_t
     u8 hlen;
     u16 exid;
 } __attribute__((packed));
+
+struct ppt_data_t {
+    u8 vnf_id;
+    u32 tstamp:24;
+} __attribute__((packed));
+
+
+#define ETH_H_SIZE sizeof(struct ethhdr)
+#define IP_H_SIZE sizeof(struct iphdr)
+#define TCP_H_SIZE sizeof(struct tcphdr)
+#define PPT_H_SIZE sizeof(struct ppt_hdr_t)
+#define PPT_DAT_SIZE sizeof(struct ppt_data_t)
 
 /* functions */
 
@@ -228,14 +231,14 @@ int ppt_source(struct __sk_buff *skb)
 
         /* check if there is enough space */
         if (tcp->doff > TCP_W_OPT_LEN_WORD_MAX -
-            ((sizeof(struct ppt_hdr_t) + sizeof(struct ppt_data_t)) >> 2))
+            ((PPT_H_SIZE + PPT_DAT_SIZE) >> 2))
             return TC_ACT_OK;
 
         /* ppt header */
         struct ppt_hdr_t ppt_hdr = {};
         struct ppt_data_t ppt_data = {};
         ppt_hdr.kind = PPT_H_KIND;
-        ppt_hdr.hlen = sizeof(ppt_hdr) + sizeof(ppt_data);
+        ppt_hdr.hlen = PPT_H_SIZE + PPT_DAT_SIZE;
         ppt_hdr.exid = PPT_H_EXID;
         ppt_data.vnf_id = VNF_ID;
 
@@ -246,14 +249,14 @@ int ppt_source(struct __sk_buff *skb)
         */
         /* update IP header & checksum */
         u16 old_ip_tlen = ip->tot_len;
-        u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + sizeof(ppt_hdr) + sizeof(ppt_data));
+        u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + PPT_H_SIZE + PPT_DAT_SIZE);
         ip->tot_len = new_ip_tlen;
         ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
         /* update TCP header len & checksum */
         u16 csum = tcp->check;
         tcp->doff = tcp_doff_csum_update(skb, &csum, tcp->doff,
-                                        (sizeof(ppt_hdr) + sizeof(ppt_data)) >> 2);
+                                        (PPT_H_SIZE + PPT_DAT_SIZE) >> 2);
 
         /* tcplen pseudo header */
         u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
@@ -275,14 +278,14 @@ int ppt_source(struct __sk_buff *skb)
         struct tcphdr tcp_buf = {};
         bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                         &tcp_buf, TCP_H_SIZE);
-        bpf_skb_adjust_room(skb, sizeof(ppt_hdr) + sizeof(ppt_data), BPF_ADJ_ROOM_NET, 0);
+        bpf_skb_adjust_room(skb, PPT_H_SIZE + PPT_DAT_SIZE, BPF_ADJ_ROOM_NET, 0);
         bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                             &tcp_buf, TCP_H_SIZE, 0);
         /* add PPT header to the new created space */
         bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE,
-                            &ppt_hdr, sizeof(ppt_hdr), 0);
-        bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE + sizeof(ppt_hdr),
-                            &ppt_data, sizeof(ppt_data), 0);
+                            &ppt_hdr, PPT_H_SIZE, 0);
+        bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE + PPT_H_SIZE,
+                            &ppt_data, PPT_DAT_SIZE, 0);
 
     } else if (ip->protocol == IPPROTO_UDP) {
         struct udphdr *udp;
@@ -294,7 +297,7 @@ int ppt_source(struct __sk_buff *skb)
         struct ppt_hdr_t ppt_hdr = {};
         struct ppt_data_t ppt_data = {};
         ppt_hdr.kind = PPT_H_KIND;
-        ppt_hdr.hlen = sizeof(ppt_hdr) + sizeof(ppt_data);
+        ppt_hdr.hlen = PPT_H_SIZE + PPT_DAT_SIZE;
         ppt_hdr.exid = PPT_H_EXID;
         ppt_data.vnf_id = VNF_ID;
 
@@ -302,7 +305,7 @@ int ppt_source(struct __sk_buff *skb)
 
         /* update IP header & checksum */
         u16 old_ip_tlen = ip->tot_len;
-        u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + sizeof(ppt_hdr) + sizeof(ppt_data));
+        u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + PPT_H_SIZE + PPT_DAT_SIZE);
         ip->tot_len = new_ip_tlen;
         ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
@@ -310,9 +313,9 @@ int ppt_source(struct __sk_buff *skb)
         u16 udp_len = ntohs(udp->len);
         bpf_skb_change_tail(skb, ETH_H_SIZE + ntohs(new_ip_tlen), 0);
         bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + udp_len,
-                            &ppt_hdr, sizeof(ppt_hdr), 0);
-        bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + udp_len + sizeof(ppt_hdr),
-                            &ppt_data, sizeof(ppt_data), 0);
+                            &ppt_hdr, PPT_H_SIZE, 0);
+        bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + udp_len + PPT_H_SIZE,
+                            &ppt_data, PPT_DAT_SIZE, 0);
     }
 
     /* update g_vars after everything is done */
@@ -343,7 +346,7 @@ int ppt_transit_ingress(struct __sk_buff *skb)
             return TC_ACT_OK;
 
         struct ppt_hdr_t *ppt_hdr;
-        CURSOR_ADVANCE(ppt_hdr, cursor, sizeof(*ppt_hdr), data_end);
+        CURSOR_ADVANCE(ppt_hdr, cursor, PPT_H_SIZE, data_end);
         if (ppt_hdr->kind != PPT_H_KIND || ppt_hdr->exid != PPT_H_EXID)
             return TC_ACT_OK;
 
@@ -355,14 +358,14 @@ int ppt_transit_ingress(struct __sk_buff *skb)
 
         /* update IP header & checksum */
         u16 old_ip_tlen = ip->tot_len;
-        u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + (sizeof(ppt_data)));
+        u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + (PPT_DAT_SIZE));
         ip->tot_len = new_ip_tlen;
         ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
         /* update TCP header len & checksum */
         u16 csum = tcp->check;
         tcp->doff = tcp_doff_csum_update(skb, &csum, tcp->doff,
-                                        sizeof(ppt_data) >> 2);
+                                        PPT_DAT_SIZE >> 2);
         /* tcplen pseudo header */
         u16 old_tcplen = htons(ntohs(old_ip_tlen) - (ip->ihl << 2));
         u16 new_tcplen = htons(ntohs(new_ip_tlen) - (ip->ihl << 2));
@@ -372,7 +375,7 @@ int ppt_transit_ingress(struct __sk_buff *skb)
         csum = incr_csum_add32(csum, ppt_data.vnf_id | (ppt_data.tstamp << 8));
 
         /* increase ppt hlen and update csum with new ppt hlen*/
-        u8 new_ppt_hlen = ppt_hdr->hlen + sizeof(ppt_data);
+        u8 new_ppt_hlen = ppt_hdr->hlen + PPT_DAT_SIZE;
         csum = incr_csum_replace16(csum,
                                 PPT_H_KIND | (ppt_hdr->hlen << 8),
                                 PPT_H_KIND | (new_ppt_hlen << 8));
@@ -387,14 +390,14 @@ int ppt_transit_ingress(struct __sk_buff *skb)
                         &tcp_buf, TCP_H_SIZE);
         bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE,
                         &__ppt_hdr, sizeof(__ppt_hdr));
-        bpf_skb_adjust_room(skb, sizeof(ppt_data), BPF_ADJ_ROOM_NET, 0);
+        bpf_skb_adjust_room(skb, PPT_DAT_SIZE, BPF_ADJ_ROOM_NET, 0);
         bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE,
                             &tcp_buf, TCP_H_SIZE, 0);
         bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE,
                             &__ppt_hdr, sizeof(__ppt_hdr), 0);
         /* add PPT header to the new created space */
         bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + TCP_H_SIZE + sizeof(__ppt_hdr),
-                            &ppt_data, sizeof(ppt_data), 0);
+                            &ppt_data, PPT_DAT_SIZE, 0);
 
     } else if (ip->protocol == IPPROTO_UDP) {
         struct udphdr *udp;
@@ -404,7 +407,7 @@ int ppt_transit_ingress(struct __sk_buff *skb)
 
         struct ppt_hdr_t ppt_hdr = {};
         bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + udp_len,
-                           &ppt_hdr, sizeof(ppt_hdr));
+                           &ppt_hdr, PPT_H_SIZE);
         if (ppt_hdr.kind != PPT_H_KIND || ppt_hdr.exid != PPT_H_EXID)
             return TC_ACT_OK;
 
@@ -414,19 +417,19 @@ int ppt_transit_ingress(struct __sk_buff *skb)
 
         /* update IP header & checksum */
         u16 old_ip_tlen = ip->tot_len;
-        u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + (sizeof(ppt_data)));
+        u16 new_ip_tlen = htons(ntohs(old_ip_tlen) + (PPT_DAT_SIZE));
         ip->tot_len = new_ip_tlen;
         ip->check = incr_csum_replace16(ip->check, old_ip_tlen, new_ip_tlen);
 
         /* new ppt data */
         bpf_skb_change_tail(skb, ETH_H_SIZE + ntohs(new_ip_tlen), 0);
         bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + udp_len + ppt_hdr.hlen,
-                            &ppt_data, sizeof(ppt_data), 0);
+                            &ppt_data, PPT_DAT_SIZE, 0);
 
         /* new ppt hdr len */
-        ppt_hdr.hlen += sizeof(ppt_data);
+        ppt_hdr.hlen += PPT_DAT_SIZE;
         bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + udp_len,
-                            &ppt_hdr, sizeof(ppt_hdr), 0);
+                            &ppt_hdr, PPT_H_SIZE, 0);
 
     }
 
@@ -455,12 +458,12 @@ int ppt_transit_egress(struct __sk_buff *skb)
             return TC_ACT_OK;
 
         struct ppt_hdr_t *ppt_hdr;
-        CURSOR_ADVANCE(ppt_hdr, cursor, sizeof(*ppt_hdr), data_end);
+        CURSOR_ADVANCE(ppt_hdr, cursor, PPT_H_SIZE, data_end);
         if (ppt_hdr->kind != PPT_H_KIND || ppt_hdr->exid != PPT_H_EXID)
             return TC_ACT_OK;
 
         struct ppt_data_t *ppt_data;
-        CURSOR_ADVANCE(ppt_data, cursor, sizeof(*ppt_data), data_end);
+        CURSOR_ADVANCE(ppt_data, cursor, PPT_DAT_SIZE, data_end);
 
         /* replace tstamp with actual pptime */
         u32 pptime = get_pptime(ppt_data->tstamp);
@@ -477,20 +480,20 @@ int ppt_transit_egress(struct __sk_buff *skb)
 
         struct ppt_hdr_t ppt_hdr = {};
         bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + udp_len,
-                           &ppt_hdr, sizeof(ppt_hdr));
+                           &ppt_hdr, PPT_H_SIZE);
         if (ppt_hdr.kind != PPT_H_KIND || ppt_hdr.exid != PPT_H_EXID)
             return TC_ACT_OK;
 
         /* replace tstamp with actual pptime. the position is the last ppt_data */
-        u8 num_ppt_data = (ppt_hdr.hlen - sizeof(ppt_hdr)) >> 2;
+        u8 num_ppt_data = (ppt_hdr.hlen - PPT_H_SIZE) >> 2;
         struct ppt_data_t ppt_data = {};
         bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + ntohs(udp->len) +
-                            sizeof(ppt_hdr) + (num_ppt_data - 1) * sizeof(ppt_data),
-                            &ppt_data, sizeof(ppt_data));
+                            PPT_H_SIZE + (num_ppt_data - 1) * PPT_DAT_SIZE,
+                            &ppt_data, PPT_DAT_SIZE);
         ppt_data.tstamp = get_pptime(ppt_data.tstamp);
         bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + ntohs(udp->len) +
-                            sizeof(ppt_hdr) + (num_ppt_data - 1) * sizeof(ppt_data),
-                            &ppt_data, sizeof(ppt_data), 0);
+                            PPT_H_SIZE + (num_ppt_data - 1) * PPT_DAT_SIZE,
+                            &ppt_data, PPT_DAT_SIZE, 0);
     }
 
     return TC_ACT_OK;
@@ -518,19 +521,19 @@ int ppt_sink(struct __sk_buff *skb)
             return TC_ACT_OK;
 
         struct ppt_hdr_t *ppt_hdr;
-        CURSOR_ADVANCE(ppt_hdr, cursor, sizeof(*ppt_hdr), data_end);
+        CURSOR_ADVANCE(ppt_hdr, cursor, PPT_H_SIZE, data_end);
         if (ppt_hdr->kind != PPT_H_KIND || ppt_hdr->exid != PPT_H_EXID)
             return TC_ACT_OK;
 
-        /* '>> 2' should be '/sizeof(struct ppt_data_t)'.
+        /* '>> 2' should be '/PPT_DAT_SIZE'.
         but the division is costly (is it optimized by compiler?)
         */
-        u8 num_ppt_data = (ppt_hdr->hlen - sizeof(*ppt_hdr)) >> 2;
+        u8 num_ppt_data = (ppt_hdr->hlen - PPT_H_SIZE) >> 2;
 
         struct ppt_data_t *ppt_data;
         struct ppt_data_t ppt_data_arr[MAX_PPT_DATA] = {0};
         for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
-            CURSOR_ADVANCE(ppt_data, cursor, sizeof(*ppt_data), data_end);
+            CURSOR_ADVANCE(ppt_data, cursor, PPT_DAT_SIZE, data_end);
             ppt_data_arr[i] = *ppt_data;
         }
 
@@ -584,21 +587,21 @@ int ppt_sink(struct __sk_buff *skb)
         */
         struct ppt_hdr_t ppt_hdr = {};
         bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + ntohs(udp->len),
-                           &ppt_hdr, sizeof(ppt_hdr));
+                           &ppt_hdr, PPT_H_SIZE);
         if (ppt_hdr.kind != PPT_H_KIND || ppt_hdr.exid != PPT_H_EXID)
             return TC_ACT_OK;
 
-        u8 num_ppt_data = (ppt_hdr.hlen - sizeof(ppt_hdr)) >> 2;
+        u8 num_ppt_data = (ppt_hdr.hlen - PPT_H_SIZE) >> 2;
 
         struct ppt_data_t ppt_data_arr[MAX_PPT_DATA] = {0};
         for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
             /* because in case of UDP, newest vnf goes to last, thus we read data from back
                so the user space receive the data in the same order of the tcp case.
-               << 2 here means * sizeof(struct ppt_data_t)
+               << 2 here means * PPT_DAT_SIZE
              */
             bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + ntohs(udp->len) +
-                               sizeof(ppt_hdr) + ((num_ppt_data-1-i) << 2),
-                               &(ppt_data_arr[i]), sizeof(struct ppt_data_t));
+                               PPT_H_SIZE + ((num_ppt_data-1-i) << 2),
+                               &(ppt_data_arr[i]), PPT_DAT_SIZE);
         }
 
         /* get the actual pptime for the newest (this) VNF before submitted to userspace */
