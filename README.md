@@ -1,19 +1,19 @@
 # PPTMon
 VNF Packet Processing Time Monitoring
 
-# Requirements
-- Linux kernel >= 4.13. Tested with kernel v5.4.
+## Requirements
+- Linux kernel >= 5.3. Tested with kernel v5.4.
 
-# Installation
+## Installation
 - Install latest [BCC](https://github.com/iovisor/bcc) from source
 - Install requirements
     ```bash
     sudo pip3 install -r requirements.txt
     ```
 
-# Usage
+## Usage
 ```bash
 sudo python3 -m pptmon
 ```
-# Notes
+## Notes
 - Reduce the MSS size in iperf so that there is room to increase/decrease
