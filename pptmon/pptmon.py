@@ -30,6 +30,8 @@ def main():
     parser.add_argument("-I", "--vnf-id", default=1, type=int,
                         choices=range(1, 256), metavar="[1, 255]",
                         help="VNF ID, between 1 and 255. Default to 1")
+    parser.add_argument("-M", "--margin", default=0, type=int,
+                        help="if |current_var - last_var| > margin, then generate new event")
     parser.add_argument("-m", "--mode", default="source_sink",
                         choices=['source', 'transit', 'sink', 'source_sink'],
                         help="mode to run pptmon")
@@ -41,6 +43,7 @@ def main():
                   cflags=["-w",
                           "-D_SINK_ONLY=%d" % (1 if args.mode=='sink' else 0),
                           "-D_VNF_ID=%d" % args.vnf_id,
+                          "-D_MARGIN=%d" % args.margin,
                           "-D_MAX_PPT_DATA=%d" % MAX_PPT_DATA,
                           "-D_PERIOD_NS=%d" % (args.period*1000000)])
     fn_ppt_source = bpf_mon.load_func("ppt_source", BPF.SCHED_CLS)

@@ -35,6 +35,7 @@
 #define SAMPLE_PERIOD_NS _PERIOD_NS
 #define MODE_SINK_ONLY _SINK_ONLY
 #define VNF_ID _VNF_ID
+#define MARGIN _MARGIN
 #define MAX_PPT_DATA _MAX_PPT_DATA
 
 
@@ -70,12 +71,10 @@
 #error  "Please fix <asm/byteorder.h>"
 #endif
 
+#define ABS(a, b) ((a>b)? (a-b):(b-a))
+
 
 /* structs */
-
-struct g_vars_t {
-    u64 prev_tstamp;
-};
 
 struct ppt_hdr_t
 {
@@ -190,9 +189,11 @@ static __always_inline u8 tcp_doff_csum_update(struct __sk_buff *skb,
 
 /* Lower kernel versions do not support BPF_F_MMAPABLE */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,5,0)
-BPF_F_TABLE("array", int, struct g_vars_t, tb_g_vars, 1, 0);
+BPF_F_TABLE("array", int, u64, tb_prev_sample_time, 1, 0);
+BPF_F_TABLE("array", int, u32, tb_prev_pptime, 1, 0);
 #else
-BPF_F_TABLE("array", int, struct g_vars_t, tb_g_vars, 1, BPF_F_MMAPABLE);
+BPF_F_TABLE("array", int, u64, tb_prev_sample_time, 1, BPF_F_MMAPABLE);
+BPF_F_TABLE("array", int, u32, tb_prev_pptime, 1, BPF_F_MMAPABLE);
 #endif
 
 BPF_PERF_OUTPUT(ppt_events);
@@ -205,11 +206,11 @@ int ppt_source(struct __sk_buff *skb)
 
     int k = 0;
 
-    struct g_vars_t *g_vars = tb_g_vars.lookup(&k);
-    if (unlikely(!g_vars))
+    u64 *prev_sample_time = tb_prev_sample_time.lookup(&k);
+    if (unlikely(!prev_sample_time))
         return TC_ACT_OK;
 
-    if (get_now_ns(skb) < g_vars->prev_tstamp + SAMPLE_PERIOD_NS)
+    if (get_now_ns(skb) < *prev_sample_time + SAMPLE_PERIOD_NS)
         return TC_ACT_OK;
 
     /* parsing pkt structure */
@@ -318,8 +319,8 @@ int ppt_source(struct __sk_buff *skb)
                             &ppt_data, PPT_DAT_SIZE, 0);
     }
 
-    /* update g_vars after everything is done */
-    g_vars->prev_tstamp = get_now_ns(skb);
+    /* update prev_sample_time after everything is done */
+    *prev_sample_time = get_now_ns(skb);
 
     return TC_ACT_OK;
 }
@@ -439,6 +440,13 @@ int ppt_transit_ingress(struct __sk_buff *skb)
 /* replace tstamp with packet processing time */
 int ppt_transit_egress(struct __sk_buff *skb)
 {
+#if MARGIN > 0
+    int k = 0;
+    u32 *prev_pptime = tb_prev_pptime.lookup(&k);
+    if (unlikely(!prev_pptime))
+        return TC_ACT_OK;
+#endif
+
     void* data_end = (void*)(long)skb->data_end;
     void* cursor = (void*)(long)skb->data;
 
@@ -467,6 +475,12 @@ int ppt_transit_egress(struct __sk_buff *skb)
 
         /* replace tstamp with actual pptime */
         u32 pptime = get_pptime(ppt_data->tstamp);
+#if MARGIN > 0
+        if (ABS(pptime, *prev_pptime) < MARGIN)
+            pptime = 0;
+        else
+            *prev_pptime = pptime;
+#endif
         tcp->check = incr_csum_replace32(tcp->check,
                                         ppt_data->vnf_id | (ppt_data->tstamp << 8),
                                         ppt_data->vnf_id | (pptime << 8));
@@ -490,7 +504,15 @@ int ppt_transit_egress(struct __sk_buff *skb)
         bpf_skb_load_bytes(skb, ETH_H_SIZE + IP_H_SIZE + ntohs(udp->len) +
                             PPT_H_SIZE + (num_ppt_data - 1) * PPT_DAT_SIZE,
                             &ppt_data, PPT_DAT_SIZE);
-        ppt_data.tstamp = get_pptime(ppt_data.tstamp);
+        u32 pptime = get_pptime(ppt_data.tstamp);
+#if MARGIN > 0
+        if (ABS(pptime, *prev_pptime) < MARGIN)
+            pptime = 0;
+        else
+            *prev_pptime = pptime;
+#endif
+        ppt_data.tstamp = pptime;
+
         bpf_skb_store_bytes(skb, ETH_H_SIZE + IP_H_SIZE + ntohs(udp->len) +
                             PPT_H_SIZE + (num_ppt_data - 1) * PPT_DAT_SIZE,
                             &ppt_data, PPT_DAT_SIZE, 0);
@@ -501,6 +523,13 @@ int ppt_transit_egress(struct __sk_buff *skb)
 
 int ppt_sink(struct __sk_buff *skb)
 {
+#if MARGIN > 0
+    int k = 0;
+    u32 *prev_pptime = tb_prev_pptime.lookup(&k);
+    if (unlikely(!prev_pptime))
+        return TC_ACT_OK;
+#endif
+
     void* data_end = (void*)(long)skb->data_end;
     void* cursor = (void*)(long)skb->data;
 
@@ -567,8 +596,20 @@ int ppt_sink(struct __sk_buff *skb)
         we do this after csum recalculation because the first ppt_data tstamp
         is modified before submitted to userspace
         */
-        ppt_data_arr[0].tstamp = get_pptime(ppt_data_arr[0].tstamp);
-        ppt_events.perf_submit(skb, &(ppt_data_arr[0]), sizeof(ppt_data_arr[0]) * MAX_PPT_DATA);
+        u32 pptime = get_pptime(ppt_data_arr[0].tstamp);
+#if MARGIN > 0
+        if (ABS(pptime, *prev_pptime) < MARGIN)
+            pptime = 0;
+        else
+            *prev_pptime = pptime;
+#endif
+        ppt_data_arr[0].tstamp = pptime;
+        /* submit to userspace if there is any value exceed the margin */
+        for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
+            if(ppt_data_arr[i].tstamp > 0)
+                ppt_events.perf_submit(skb, &(ppt_data_arr[0]), MAX_PPT_DATA * sizeof(ppt_data_arr[0]));
+            break;
+        }
 
         /*  Now we actually remove ppt header */
         struct tcphdr tcp_buf = {};
@@ -605,8 +646,20 @@ int ppt_sink(struct __sk_buff *skb)
         }
 
         /* get the actual pptime for the newest (this) VNF before submitted to userspace */
-        ppt_data_arr[0].tstamp = get_pptime(ppt_data_arr[0].tstamp);
-        ppt_events.perf_submit(skb, &(ppt_data_arr[0]), MAX_PPT_DATA * sizeof(ppt_data_arr[0]));
+        u32 pptime = get_pptime(ppt_data_arr[0].tstamp);
+#if MARGIN > 0
+        if (ABS(pptime, *prev_pptime) < MARGIN)
+            pptime = 0;
+        else
+            *prev_pptime = pptime;
+#endif
+        ppt_data_arr[0].tstamp = pptime;
+        /* submit to userspace if there is any value exceed the margin */
+        for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
+            if(ppt_data_arr[i].tstamp > 0)
+                ppt_events.perf_submit(skb, &(ppt_data_arr[0]), MAX_PPT_DATA * sizeof(ppt_data_arr[0]));
+            break;
+        }
 
         /* update IP header & checksum */
         u16 old_ip_tlen = ip->tot_len;
