@@ -1,8 +1,10 @@
 from bcc import BPF
 from pyroute2 import IPRoute
+from ipaddress import IPv4Address
 import ctypes as ct
 import argparse
 import time
+
 
 MAX_PPT_DATA = 3
 
@@ -27,6 +29,11 @@ def main():
                         help="packet in interface. Default to ens4")
     parser.add_argument("-o", "--outif", default="ens4",
                         help="packet out interface. Default to ens4")
+    parser.add_argument("--src-ip", help="flow source ip. Default match all")
+    parser.add_argument("--dst-ip", help="flow source ip. Default match all")
+    parser.add_argument("--src-port", help="flow source ip. Default match all")
+    parser.add_argument("--dst-port", help="flow source ip. Default match all")
+    parser.add_argument("--proto", help="flow source ip. Default match tcp and udp")
     parser.add_argument("-I", "--vnf-id", default=1, type=int,
                         choices=range(1, 256), metavar="[1, 255]",
                         help="VNF ID, between 1 and 255. Default to 1")
@@ -37,21 +44,39 @@ def main():
                         help="mode to run pptmon")
     args = parser.parse_args()
 
-    ipr = IPRoute()
+    cflags = ["-w",
+            "-DVNF_ID=%d" % args.vnf_id,
+            "-DMAX_PPT_DATA=%d" % MAX_PPT_DATA,
+            "-DSAMPLE_PERIOD_NS=%d" % (args.period*1000000)]
+    if args.src_ip is not None:
+        cflags.append("-DSRC_IP=%d" % int(IPv4Address(args.src_ip)))
+    if args.src_port is not None:
+        cflags.append("-DSRC_PORT=%d" % args.src_port)
+    if args.dst_ip is not None:
+        cflags.append("-DDST_IP=%d" % int(IPv4Address(args.dst_ip)))
+    if args.dst_port is not None:
+        cflags.append("-DDST_PORT=%d" % args.dst_port)
+    if args.proto is None:
+        cflags.append("-DFILTER_TCP")
+        cflags.append("-DFILTER_UDP")
+    elif args.proto == "tcp":
+        cflags.append("-DFILTER_TCP")
+    elif args.proto == "udp":
+        cflags.append("-DFILTER_UDP")
+    else:
+        print("unsupported protocol: %s" %(args.proto))
+        exit(1)
+    if args.margin is not None:
+        cflags.append("-DMARGIN=%d" % args.margin)
 
-    bpf_mon = BPF(src_file="pptmon.c", debug=0,
-                  cflags=["-w",
-                          "-D_SINK_ONLY=%d" % (1 if args.mode=='sink' else 0),
-                          "-D_VNF_ID=%d" % args.vnf_id,
-                          "-D_MARGIN=%d" % args.margin,
-                          "-D_MAX_PPT_DATA=%d" % MAX_PPT_DATA,
-                          "-D_PERIOD_NS=%d" % (args.period*1000000)])
+    bpf_mon = BPF(src_file="pptmon.c", debug=0, cflags=cflags)
     fn_ppt_source = bpf_mon.load_func("ppt_source", BPF.SCHED_CLS)
     fn_ppt_transit_ingress = bpf_mon.load_func("ppt_transit_ingress", BPF.SCHED_CLS)
     fn_ppt_transit_egress = bpf_mon.load_func("ppt_transit_egress", BPF.SCHED_CLS)
     fn_ppt_sink = bpf_mon.load_func("ppt_sink", BPF.SCHED_CLS)
     ppt_events = bpf_mon.get_table("ppt_events")
 
+    ipr = IPRoute()
     inif_idx = ipr.link_lookup(ifname=args.inif)[0]
     outif_idx = ipr.link_lookup(ifname=args.outif)[0]
     ipr.tc("add", "clsact", inif_idx)

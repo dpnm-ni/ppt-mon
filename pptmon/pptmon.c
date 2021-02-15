@@ -32,13 +32,6 @@
    so we need to put everything in one file
  */
 
-#define SAMPLE_PERIOD_NS _PERIOD_NS
-#define MODE_SINK_ONLY _SINK_ONLY
-#define VNF_ID _VNF_ID
-#define MARGIN _MARGIN
-#define MAX_PPT_DATA _MAX_PPT_DATA
-
-
 #define TCP_W_OPT_LEN_WORD_MAX 15
 #define TCP_W_OPT_LEN_WORD_MIN 5
 /* use experimental tcp option kind */
@@ -230,6 +223,22 @@ int ppt_source(struct __sk_buff *skb)
         struct tcphdr *tcp;
         CURSOR_ADVANCE(tcp, cursor, sizeof(*tcp), data_end);
 
+#ifndef FILTER_TCP
+    return TC_ACT_OK;
+#endif
+#ifdef SRC_IP
+        if (ip->saddr != htonl(SRC_IP)) return TC_ACT_OK;
+#endif
+#ifdef DST_IP
+        if (ip->daddr != htonl(DST_IP)) return TC_ACT_OK;
+#endif
+#ifdef SRC_PORT
+        if (tcp->sport != htonl(SRC_PORT)) return TC_ACT_OK;
+#endif
+#ifdef DST_PORT
+        if (tcp->dport != htonl(DST_PORT)) return TC_ACT_OK;
+#endif
+
         /* check if there is enough space */
         if (tcp->doff > TCP_W_OPT_LEN_WORD_MAX -
             ((PPT_H_SIZE + PPT_DAT_SIZE) >> 2))
@@ -291,6 +300,22 @@ int ppt_source(struct __sk_buff *skb)
     } else if (ip->protocol == IPPROTO_UDP) {
         struct udphdr *udp;
         CURSOR_ADVANCE(udp, cursor, sizeof(*udp), data_end);
+
+#ifndef FILTER_UDP
+        return TC_ACT_OK;
+#endif
+#ifdef SRC_IP
+        if (ip->saddr != htonl(SRC_IP)) return TC_ACT_OK;
+#endif
+#ifdef DST_IP
+        if (ip->daddr != htonl(DST_IP)) return TC_ACT_OK;
+#endif
+#ifdef SRC_PORT
+        if (udp->source != htonl(SRC_PORT)) return TC_ACT_OK;
+#endif
+#ifdef DST_PORT
+        if (udp->dest != htonl(DST_PORT)) return TC_ACT_OK;
+#endif
 
         /* TODO: check if there is enough space */
 
@@ -440,7 +465,7 @@ int ppt_transit_ingress(struct __sk_buff *skb)
 /* replace tstamp with packet processing time */
 int ppt_transit_egress(struct __sk_buff *skb)
 {
-#if MARGIN > 0
+#ifdef MARGIN
     int k = 0;
     u32 *prev_pptime = tb_prev_pptime.lookup(&k);
     if (unlikely(!prev_pptime))
@@ -475,7 +500,7 @@ int ppt_transit_egress(struct __sk_buff *skb)
 
         /* replace tstamp with actual pptime */
         u32 pptime = get_pptime(ppt_data->tstamp);
-#if MARGIN > 0
+#ifdef MARGIN
         if (ABS(pptime, *prev_pptime) < MARGIN)
             pptime = 0;
         else
@@ -505,7 +530,7 @@ int ppt_transit_egress(struct __sk_buff *skb)
                             PPT_H_SIZE + (num_ppt_data - 1) * PPT_DAT_SIZE,
                             &ppt_data, PPT_DAT_SIZE);
         u32 pptime = get_pptime(ppt_data.tstamp);
-#if MARGIN > 0
+#ifdef MARGIN
         if (ABS(pptime, *prev_pptime) < MARGIN)
             pptime = 0;
         else
@@ -523,7 +548,7 @@ int ppt_transit_egress(struct __sk_buff *skb)
 
 int ppt_sink(struct __sk_buff *skb)
 {
-#if MARGIN > 0
+#ifdef MARGIN
     int k = 0;
     u32 *prev_pptime = tb_prev_pptime.lookup(&k);
     if (unlikely(!prev_pptime))
@@ -597,7 +622,7 @@ int ppt_sink(struct __sk_buff *skb)
         is modified before submitted to userspace
         */
         u32 pptime = get_pptime(ppt_data_arr[0].tstamp);
-#if MARGIN > 0
+#ifdef MARGIN
         if (ABS(pptime, *prev_pptime) < MARGIN)
             pptime = 0;
         else
@@ -647,7 +672,7 @@ int ppt_sink(struct __sk_buff *skb)
 
         /* get the actual pptime for the newest (this) VNF before submitted to userspace */
         u32 pptime = get_pptime(ppt_data_arr[0].tstamp);
-#if MARGIN > 0
+#ifdef MARGIN
         if (ABS(pptime, *prev_pptime) < MARGIN)
             pptime = 0;
         else
