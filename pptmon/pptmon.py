@@ -4,6 +4,7 @@ from ipaddress import IPv4Address
 import ctypes as ct
 import argparse
 import time
+import ast
 
 
 MAX_PPT_DATA = 3
@@ -20,9 +21,14 @@ def ppt_event_handler(ctx, data, size):
             print(vnf_id, "\t", ppt_data >> 8)
     print("")
 
+def set_tb_val(tb, key, val):
+    k = tb.Key(key)
+    leaf = tb.Leaf(val)
+    tb[k] = leaf
+
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("-p", "--sample-period", default=1000, type=int,
                         help="samping period [ms]. Default to 1000")
     parser.add_argument("-i", "--inif", default="ens4",
@@ -30,15 +36,17 @@ def main():
     parser.add_argument("-o", "--outif", default="ens4",
                         help="packet out interface. Default to ens4")
     parser.add_argument("--src-ip", help="flow source ip. Default match all")
-    parser.add_argument("--dst-ip", help="flow source ip. Default match all")
-    parser.add_argument("--src-port", help="flow source ip. Default match all")
-    parser.add_argument("--dst-port", help="flow source ip. Default match all")
-    parser.add_argument("--proto", help="flow source ip. Default match tcp and udp")
+    parser.add_argument("--dst-ip", help="flow dest ip. Default match all")
+    parser.add_argument("--src-port", help="flow source port. Default match all")
+    parser.add_argument("--dst-port", help="flow dest port. Default match all")
+    parser.add_argument("--proto", help="flow protocol. Default match tcp and udp")
     parser.add_argument("-I", "--vnf-id", default=1, type=int,
                         choices=range(1, 256), metavar="[1, 255]",
                         help="VNF ID, between 1 and 255. Default to 1")
-    parser.add_argument("-M", "--margin", type=int,
-                        help="if |current_var - last_var| > margin, then generate new event")
+    parser.add_argument("-M", "--margins",
+                        help="if |current_var - last_var| > margin, then generate new event\n"
+                            "the input format is '[(vnf_id_1, margin_1), ..., (vnf_id_N, margin_N)]'\n"
+                            "e.g.,: '[(1, 50), (2, 10)]'. Default margin is 0")
     parser.add_argument("-P", "--update-period", default=1000, type=int,
                         help="if margin is used, this set the period [ms] to force updating new value")
     parser.add_argument("-m", "--mode", default="source_sink",
@@ -69,8 +77,8 @@ def main():
     else:
         print("unsupported protocol: %s" %(args.proto))
         exit(1)
-    if args.margin is not None:
-        cflags.append("-DMARGIN=%d" % args.margin)
+    if args.margins is not None:
+        cflags.append("-DMARGIN")
 
     bpf_mon = BPF(src_file="pptmon.c", debug=0, cflags=cflags)
     fn_ppt_source = bpf_mon.load_func("ppt_source", BPF.SCHED_CLS)
@@ -78,6 +86,11 @@ def main():
     fn_ppt_transit_egress = bpf_mon.load_func("ppt_transit_egress", BPF.SCHED_CLS)
     fn_ppt_sink = bpf_mon.load_func("ppt_sink", BPF.SCHED_CLS)
     ppt_events = bpf_mon.get_table("ppt_events")
+
+    if args.margins is not None:
+        tb_margins = bpf_mon.get_table("tb_margins")
+        for margin in ast.literal_eval(args.margins):
+            set_tb_val(tb_margins, margin[0], margin[1])
 
     ipr = IPRoute()
     inif_idx = ipr.link_lookup(ifname=args.inif)[0]

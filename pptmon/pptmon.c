@@ -173,10 +173,12 @@ static __always_inline u8 tcp_doff_csum_update(struct __sk_buff *skb,
 BPF_F_TABLE("array", int, u64, tb_prev_sample_time, 1, 0);
 BPF_F_TABLE("array", int, u64, tb_prev_update_time, 1, 0);
 BPF_F_TABLE("array", int, u32, tb_prev_pptime, MAX_VNF_ID, 0);
+BPF_F_TABLE("array", int, u32, tb_margins, MAX_VNF_ID, 0);
 #else
 BPF_F_TABLE("array", int, u64, tb_prev_sample_time, 1, BPF_F_MMAPABLE);
 BPF_F_TABLE("array", int, u64, tb_prev_update_time, 1, BPF_F_MMAPABLE);
 BPF_F_TABLE("array", int, u32, tb_prev_pptime, MAX_VNF_ID, BPF_F_MMAPABLE);
+BPF_F_TABLE("array", int, u32, tb_margins, MAX_VNF_ID, BPF_F_MMAPABLE);
 #endif
 
 BPF_PERF_OUTPUT(ppt_events);
@@ -647,7 +649,7 @@ int ppt_sink(struct __sk_buff *skb)
     /* submit to userspace if there is any value exceed the margin */
 #ifdef MARGIN
     int k = 0;
-    u32 *prev_pptime;
+    u32 *prev_pptime, *margin;
     u64 *prev_update_time = tb_prev_update_time.lookup(&k);
     if (unlikely(!prev_update_time))
             return TC_ACT_OK;
@@ -659,9 +661,10 @@ int ppt_sink(struct __sk_buff *skb)
         for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
             k = ppt_data_arr[i].vnf_id;
             prev_pptime = tb_prev_pptime.lookup(&k);
-            if (unlikely(!prev_pptime))
+            margin = tb_margins.lookup(&k);
+            if (unlikely(!prev_pptime || !margin))
                 return TC_ACT_OK;
-            if (ABS(ppt_data_arr[i].tstamp, *prev_pptime) < MARGIN)
+            if (ABS(ppt_data_arr[i].tstamp, *prev_pptime) < *margin)
                 ppt_data_arr[i].tstamp = 0;
             else
                 *prev_pptime = ppt_data_arr[i].tstamp;
