@@ -23,7 +23,7 @@ def ppt_event_handler(ctx, data, size):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-p", "--period", default=1000, type=int,
+    parser.add_argument("-p", "--sample-period", default=1000, type=int,
                         help="samping period [ms]. Default to 1000")
     parser.add_argument("-i", "--inif", default="ens4",
                         help="packet in interface. Default to ens4")
@@ -37,8 +37,10 @@ def main():
     parser.add_argument("-I", "--vnf-id", default=1, type=int,
                         choices=range(1, 256), metavar="[1, 255]",
                         help="VNF ID, between 1 and 255. Default to 1")
-    parser.add_argument("-M", "--margin", default=0, type=int,
+    parser.add_argument("-M", "--margin", type=int,
                         help="if |current_var - last_var| > margin, then generate new event")
+    parser.add_argument("-P", "--update-period", default=1000, type=int,
+                        help="if margin is used, this set the period [ms] to force updating new value")
     parser.add_argument("-m", "--mode", default="source_sink",
                         choices=['source', 'transit', 'sink', 'source_sink'],
                         help="mode to run pptmon")
@@ -47,7 +49,8 @@ def main():
     cflags = ["-w",
             "-DVNF_ID=%d" % args.vnf_id,
             "-DMAX_PPT_DATA=%d" % MAX_PPT_DATA,
-            "-DSAMPLE_PERIOD_NS=%d" % (args.period*1000000)]
+            "-DUPDATE_PERIOD_NS=%d" % (args.update_period*1000000),
+            "-DSAMPLE_PERIOD_NS=%d" % (args.sample_period*1000000)]
     if args.src_ip is not None:
         cflags.append("-DSRC_IP=%d" % int(IPv4Address(args.src_ip)))
     if args.src_port is not None:
