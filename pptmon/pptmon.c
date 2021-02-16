@@ -132,19 +132,6 @@ static __always_inline u16 incr_csum_remove32(u16 old_csum, u32 rem_val)
     return incr_csum_add32(old_csum, ~rem_val);
 }
 
-static __always_inline u64 get_now_ns(struct __sk_buff *skb)
-{
-    /* skb->tstamp only available after kernel 5.0. Thus for lower kernel
-       version, we use bpf_ktime_get_ns(), which is relative time from boot,
-       and may be more expensive call
-     */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
-    return bpf_ktime_get_ns();
-#else
-    return skb->tstamp;
-#endif
-}
-
 static __always_inline u64 get_pptime(u32 old_ktime)
 {
     u32 ktime_now = bpf_ktime_get_ns()/1000 & 0xffffff;
@@ -206,7 +193,7 @@ int ppt_source(struct __sk_buff *skb)
     if (unlikely(!prev_sample_time))
         return TC_ACT_OK;
 
-    u64 now_time = get_now_ns(skb);
+    u64 now_time = bpf_ktime_get_ns();
     if (now_time < *prev_sample_time + SAMPLE_PERIOD_NS)
         return TC_ACT_OK;
 
@@ -661,15 +648,24 @@ int ppt_sink(struct __sk_buff *skb)
 #ifdef MARGIN
     int k = 0;
     u32 *prev_pptime;
-    for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
-        k = ppt_data_arr[i].vnf_id;
-        prev_pptime = tb_prev_pptime.lookup(&k);
-        if (unlikely(!prev_pptime))
+    u64 *prev_update_time = tb_prev_update_time.lookup(&k);
+    if (unlikely(!prev_update_time))
             return TC_ACT_OK;
-        if (ABS(ppt_data_arr[i].tstamp, *prev_pptime) < MARGIN)
-            ppt_data_arr[i].tstamp = 0;
-        else
-            *prev_pptime = ppt_data_arr[i].tstamp;
+    u64 now_time = bpf_ktime_get_ns();
+    /* force update if UPDATE_PERIOD_NS is over */
+    if (now_time > *prev_update_time + UPDATE_PERIOD_NS) {
+        *prev_update_time = now_time;
+    } else {
+        for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
+            k = ppt_data_arr[i].vnf_id;
+            prev_pptime = tb_prev_pptime.lookup(&k);
+            if (unlikely(!prev_pptime))
+                return TC_ACT_OK;
+            if (ABS(ppt_data_arr[i].tstamp, *prev_pptime) < MARGIN)
+                ppt_data_arr[i].tstamp = 0;
+            else
+                *prev_pptime = ppt_data_arr[i].tstamp;
+        }
     }
 #endif
 
