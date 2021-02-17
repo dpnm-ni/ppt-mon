@@ -623,7 +623,6 @@ int ppt_sink(struct __sk_buff *skb)
 
         num_ppt_data = (ppt_hdr.hlen - PPT_H_SIZE) >> 2;
 
-        struct ppt_data_t ppt_data_arr[MAX_PPT_DATA] = {0};
         for (u8 i = 0; i < num_ppt_data && i < MAX_PPT_DATA; i++){
             /* because in case of UDP, newest vnf goes to last, thus we read data from back
                so the user space receive the data in the same order of the tcp case.
