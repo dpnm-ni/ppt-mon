@@ -185,3 +185,4 @@ dkms.conf
 
 # Compiled binary
 main
+delay_emulator
