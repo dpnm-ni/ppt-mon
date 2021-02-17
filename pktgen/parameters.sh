@@ -15,6 +15,7 @@ function usage() {
     echo "  -f : (\$F_THREAD)  index of first thread (zero indexed CPU number)"
     echo "  -c : (\$SKB_CLONE) SKB clones send before alloc new SKB"
     echo "  -n : (\$COUNT)     num messages to send per thread, 0 means indefinitely"
+    echo "  -D : (\$DELAY)     delay [ns] between packets. 0 means maximum speed"
     echo "  -b : (\$BURST)     HW level bursting of SKBs"
     echo "  -v : (\$VERBOSE)   verbose"
     echo "  -x : (\$DEBUG)     debug"
@@ -24,7 +25,7 @@ function usage() {
 
 ##  --- Parse command line arguments / parameters ---
 ## echo "Commandline options:"
-while getopts "s:i:d:m:p:f:t:c:n:b:vxh6" option; do
+while getopts "s:i:d:D:m:p:f:t:c:n:b:vxh6" option; do
     case $option in
         i) # interface
           export DEV=$OPTARG
@@ -37,6 +38,10 @@ while getopts "s:i:d:m:p:f:t:c:n:b:vxh6" option; do
         d) # destination IP
           export DEST_IP=$OPTARG
 	  info "Destination IP set to: DEST_IP=$DEST_IP"
+          ;;
+        D)
+          export DELAY=$OPTARG
+	  info "DELAY set to: DELAY=$DELAY"
           ;;
         m) # MAC
           export DST_MAC=$OPTARG

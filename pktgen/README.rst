@@ -13,21 +13,9 @@ by shell source'ing.  Namely "functions.sh" and "parameters.sh".
 Common parameters
 -----------------
 The parameters.sh file support easy and consistant parameter parsing
-across the sample scripts.  Usage example is printed on errors::
+across the sample scripts. For how to run:
 
- Usage: ./pktgen_sample01_simple.sh [-vx] -i ethX
-  -i : ($DEV)       output interface/device (required)
-  -s : ($PKT_SIZE)  packet size
-  -d : ($DEST_IP)   destination IP
-  -m : ($DST_MAC)   destination MAC-addr
-  -p : ($DST_PORT)  destination PORT range (e.g. 433-444) is also allowed
-  -t : ($THREADS)   threads to start
-  -f : ($F_THREAD)  index of first thread (zero indexed CPU number)
-  -c : ($SKB_CLONE) SKB clones send before alloc new SKB
-  -n : ($COUNT)     num messages to send per thread, 0 means indefinitely
-  -b : ($BURST)     HW level bursting of SKBs
-  -v : ($VERBOSE)   verbose
-  -x : ($DEBUG)     debug
+ ./pktgen_sample01_simple.sh -h
 
 The global variable being set is also listed.  E.g. the required
 interface/device parameter "-i" sets variable $DEV.

@@ -28,7 +28,7 @@ if [ -n "$DST_PORT" ]; then
 fi
 
 # Base Config
-DELAY="0"        # Zero means max speed
+[ -z "$DELAY" ] && DELAY="0" # Zero means max speed
 
 # Flow variation random source port between min and max
 UDP_MIN=9
