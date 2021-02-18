@@ -10,16 +10,12 @@ import ast
 MAX_PPT_DATA = 3
 
 def ppt_event_handler(ctx, data, size):
-    class Event(ct.Structure):
-        _fields_ = [("ppt_datas", ct.c_uint32 * MAX_PPT_DATA)]
-
-    ppt = ct.cast(data, ct.POINTER(Event)).contents
-    for ppt_data in ppt.ppt_datas:
+    ppt_datas = ct.cast(data, ct.POINTER(ct.c_uint32 * MAX_PPT_DATA)).contents
+    for ppt_data in ppt_datas:
         # network byte order
         vnf_id = ppt_data & 0xff
         if (vnf_id):
             print(vnf_id, "\t", ppt_data >> 8)
-    print("")
 
 def set_tb_val(tb, key, val):
     k = tb.Key(key)
