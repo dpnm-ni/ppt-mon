@@ -6,16 +6,9 @@ import argparse
 import time
 import ast
 
+import pyximport; pyximport.install(language_level=3)
+import ppt_handler
 
-MAX_PPT_DATA = 3
-
-def ppt_event_handler(ctx, data, size):
-    ppt_datas = ct.cast(data, ct.POINTER(ct.c_uint32 * MAX_PPT_DATA)).contents
-    for ppt_data in ppt_datas:
-        # network byte order
-        vnf_id = ppt_data & 0xff
-        if (vnf_id):
-            print(vnf_id, "\t", ppt_data >> 8)
 
 def set_tb_val(tb, key, val):
     k = tb.Key(key)
@@ -52,7 +45,7 @@ def main():
 
     cflags = ["-w",
             "-DVNF_ID=%d" % args.vnf_id,
-            "-DMAX_PPT_DATA=%d" % MAX_PPT_DATA,
+            "-DMAX_PPT_DATA=%d" % ppt_handler.MAX_PPT_DATA,
             "-DUPDATE_PERIOD_NS=%d" % (args.update_period*1000000),
             "-DSAMPLE_PERIOD_NS=%d" % (args.sample_period*1000000)]
     if args.src_ip is not None:
@@ -119,7 +112,7 @@ def main():
                 direct_action=True)
 
 
-    ppt_events.open_perf_buffer(ppt_event_handler, page_cnt=512)
+    ppt_events.open_perf_buffer(ppt_handler.ppt_event_handler, page_cnt=2048)
 
     print("pptmon is loaded\n")
 
