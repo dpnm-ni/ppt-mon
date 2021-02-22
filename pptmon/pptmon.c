@@ -228,11 +228,11 @@ int ppt_source(struct __sk_buff *skb)
             return TC_ACT_OK;
 #endif
 #ifdef SRC_PORT
-        if (tcp->sport != htonl(SRC_PORT))
+        if (tcp->source != htons(SRC_PORT))
             return TC_ACT_OK;
 #endif
 #ifdef DST_PORT
-        if (tcp->dport != htonl(DST_PORT))
+        if (tcp->dest != htons(DST_PORT))
             return TC_ACT_OK;
 #endif
 
@@ -310,11 +310,11 @@ int ppt_source(struct __sk_buff *skb)
             return TC_ACT_OK;
 #endif
 #ifdef SRC_PORT
-        if (udp->source != htonl(SRC_PORT))
+        if (udp->source != htons(SRC_PORT))
             return TC_ACT_OK;
 #endif
 #ifdef DST_PORT
-        if (udp->dest != htonl(DST_PORT))
+        if (udp->dest != htons(DST_PORT))
             return TC_ACT_OK;
 #endif
 

@@ -26,8 +26,8 @@ def main():
                         help="packet out interface. Default to ens4")
     parser.add_argument("--src-ip", help="flow source ip. Default match all")
     parser.add_argument("--dst-ip", help="flow dest ip. Default match all")
-    parser.add_argument("--src-port", help="flow source port. Default match all")
-    parser.add_argument("--dst-port", help="flow dest port. Default match all")
+    parser.add_argument("--src-port", type=int, help="flow source port. Default match all")
+    parser.add_argument("--dst-port", type=int, help="flow dest port. Default match all")
     parser.add_argument("--proto", help="flow protocol. Default match tcp and udp")
     parser.add_argument("-I", "--vnf-id", default=1, type=int,
                         choices=range(1, 256), metavar="[1, 255]",
@@ -131,6 +131,7 @@ def main():
         pass
 
     finally:
+        ppt_handler.print_num_data_point()
         ipr.tc("del", "clsact", inif_idx)
         if (outif_idx != inif_idx):
             ipr.tc("del", "clsact", outif_idx)
