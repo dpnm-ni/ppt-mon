@@ -135,7 +135,6 @@ int main(int argc, char *argv[])
             perror("sendto() error");
             exit(1);
         }
-        printf("%llu\n", get_now_us() - start_time);
     }
     close(sock_raw);
     return 0;
