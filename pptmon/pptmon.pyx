@@ -40,8 +40,8 @@ def main():
                         help="samping period [ms]. Default to 1000")
     parser.add_argument("-i", "--inif", default="ens4",
                         help="packet in interface. Default to ens4")
-    parser.add_argument("-o", "--outif", default="ens4",
-                        help="packet out interface. Default to ens4")
+    parser.add_argument("-o", "--outif",
+                        help="packet out interface. Default similar to inif")
     parser.add_argument("--src-ip", help="flow source ip. Default match all")
     parser.add_argument("--dst-ip", help="flow dest ip. Default match all")
     parser.add_argument("--src-port", type=int, help="flow source port. Default match all")
@@ -66,6 +66,8 @@ def main():
             "-DMAX_PPT_DATA=%d" % MAX_PPT_DATA,
             "-DUPDATE_PERIOD_NS=%d" % (args.update_period*1000000),
             "-DSAMPLE_PERIOD_NS=%d" % (args.sample_period*1000000)]
+    if args.outif is None:
+        args.outif = args.inif
     if args.src_ip is not None:
         cflags.append("-DSRC_IP=%d" % int(IPv4Address(args.src_ip)))
     if args.src_port is not None:
