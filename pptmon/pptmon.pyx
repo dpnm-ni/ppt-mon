@@ -6,9 +6,27 @@ import argparse
 import time
 import ast
 
-import pyximport; pyximport.install(language_level=3)
-import ppt_handler
+# import
+from libc.stdint cimport uintptr_t
+from libc.stdio cimport printf
 
+cdef enum: _MAX_PPT_DATA = 1
+MAX_PPT_DATA = _MAX_PPT_DATA
+cdef unsigned int data_cnt = 0
+
+def ppt_event_handler(ctx, data, size):
+    global data_cnt
+    ppt_data = <unsigned int*> (<uintptr_t> data)
+
+    for i in range(0, _MAX_PPT_DATA):
+        # network byte order
+        vnf_id = ppt_data[i] & 0xff
+        if (vnf_id):
+            # printf("%lu\t%u\n", vnf_id, ppt_data[i] >> 8)
+            data_cnt = data_cnt + 1
+
+def print_num_data_point():
+    printf("number of data points: %u\n", data_cnt)
 
 def set_tb_val(tb, key, val):
     k = tb.Key(key)
@@ -45,7 +63,7 @@ def main():
 
     cflags = ["-w",
             "-DVNF_ID=%d" % args.vnf_id,
-            "-DMAX_PPT_DATA=%d" % ppt_handler.MAX_PPT_DATA,
+            "-DMAX_PPT_DATA=%d" % MAX_PPT_DATA,
             "-DUPDATE_PERIOD_NS=%d" % (args.update_period*1000000),
             "-DSAMPLE_PERIOD_NS=%d" % (args.sample_period*1000000)]
     if args.src_ip is not None:
@@ -112,7 +130,7 @@ def main():
                 direct_action=True)
 
 
-    ppt_events.open_perf_buffer(ppt_handler.ppt_event_handler, page_cnt=2048)
+    ppt_events.open_perf_buffer(ppt_event_handler, page_cnt=2048)
 
     print("pptmon is loaded\n")
 
@@ -131,7 +149,7 @@ def main():
         pass
 
     finally:
-        ppt_handler.print_num_data_point()
+        print_num_data_point()
         ipr.tc("del", "clsact", inif_idx)
         if (outif_idx != inif_idx):
             ipr.tc("del", "clsact", outif_idx)
