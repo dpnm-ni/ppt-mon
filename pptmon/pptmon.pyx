@@ -1,22 +1,52 @@
 from bcc import BPF
 from pyroute2 import IPRoute
 from ipaddress import IPv4Address
+from influxdb import InfluxDBClient
 import ctypes as ct
 import argparse
 import time
 import ast
+import threading
 
-# import
 from libc.stdint cimport uintptr_t
 from libc.stdio cimport printf
 
+# Default value
 cdef enum: _MAX_PPT_DATA = 1
 MAX_PPT_DATA = _MAX_PPT_DATA
-cdef unsigned int data_cnt = 0
+idb_dbname = "pptmon"
+idb_user = "root"
+idb_password = "root"
+# unit: second
+idb_push_period = 1
 
-def ppt_event_handler(ctx, data, size):
-    global data_cnt
-    ppt_data = <unsigned int*> (<uintptr_t> data)
+# init var
+cdef unsigned int data_cnt = 0
+idb_client = None
+idb_thread = None
+exit_flag = threading.Event()
+data_lock = threading.Lock()
+data = []
+
+def send_to_influxdb():
+    global data
+    while not exit_flag.is_set():
+        time.sleep(idb_push_period)
+
+        data_lock.acquire()
+        data_copy = data
+        data = []
+        data_lock.release()
+
+        if len(data_copy) > 0:
+            idb_client.write_points(points=data_copy, protocol="line")
+            print("sent to influxdb: ", len(data_copy))
+
+
+def ppt_event_handler(ctx, dat, size):
+    global data_cnt, data
+
+    ppt_data = <unsigned int*> (<uintptr_t> dat)
 
     for i in range(0, _MAX_PPT_DATA):
         # network byte order
@@ -24,9 +54,14 @@ def ppt_event_handler(ctx, data, size):
         if (vnf_id):
             # printf("%lu\t%u\n", vnf_id, ppt_data[i] >> 8)
             data_cnt = data_cnt + 1
+            if idb_client is not None:
+                data_lock.acquire()
+                data.append(u"%d value=%d" %(vnf_id, ppt_data[i] >> 8))
+                data_lock.release()
 
 def print_num_data_point():
     printf("number of data points: %u\n", data_cnt)
+    print(data)
 
 def set_tb_val(tb, key, val):
     k = tb.Key(key)
@@ -56,9 +91,14 @@ def main():
                             "e.g.,: '[(1, 50), (2, 10)]'. Default margin is 0")
     parser.add_argument("-P", "--update-period", default=1000, type=int,
                         help="if margin is used, this set the period [ms] to force updating new value")
+    parser.add_argument("--idb-host",
+                        help="Set to influxdb host if want to send data to influxdb")
+    parser.add_argument("--idb-port", default=8086, type=int,
+                        help="influxdb port. Default to 8086")
     parser.add_argument("-m", "--mode", default="source_sink",
                         choices=['source', 'transit', 'sink', 'source_sink'],
-                        help="mode to run pptmon")
+                        help="mode to run pptmon. Default to source_sink")
+
     args = parser.parse_args()
 
     cflags = ["-w",
@@ -66,6 +106,7 @@ def main():
             "-DMAX_PPT_DATA=%d" % MAX_PPT_DATA,
             "-DUPDATE_PERIOD_NS=%d" % (args.update_period*1000000),
             "-DSAMPLE_PERIOD_NS=%d" % (args.sample_period*1000000)]
+
     if args.outif is None:
         args.outif = args.inif
     if args.src_ip is not None:
@@ -88,6 +129,13 @@ def main():
         exit(1)
     if args.margins is not None:
         cflags.append("-DMARGIN")
+
+    if args.idb_host is not None:
+        global idb_client, idb_thread
+        idb_client = InfluxDBClient(args.idb_host, args.idb_port, idb_user, idb_password, idb_dbname)
+        # create_database do nothing if db is already exist
+        idb_client.create_database(idb_dbname)
+        idb_thread = threading.Thread(target=send_to_influxdb)
 
     bpf_mon = BPF(src_file="pptmon.c", debug=0, cflags=cflags)
     fn_ppt_source = bpf_mon.load_func("ppt_source", BPF.SCHED_CLS)
@@ -136,6 +184,9 @@ def main():
 
     print("pptmon is loaded\n")
 
+    if idb_thread is not None:
+        idb_thread.start()
+
     try:
         if args.mode == "sink" or args.mode == "source_sink":
             print("VNF ID:  PP TIME [us]")
@@ -151,7 +202,10 @@ def main():
         pass
 
     finally:
-        print_num_data_point()
         ipr.tc("del", "clsact", inif_idx)
         if (outif_idx != inif_idx):
             ipr.tc("del", "clsact", outif_idx)
+        print_num_data_point()
+        exit_flag.set()
+        if idb_thread is not None:
+            idb_thread.join()
