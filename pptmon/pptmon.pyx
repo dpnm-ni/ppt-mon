@@ -198,7 +198,7 @@ def main():
             print("---------------------")
             while True:
                 # poll new ppt events
-                bpf_mon.kprobe_poll()
+                bpf_mon.perf_buffer_poll()
         else:
             while True:
                 sleep(1)
