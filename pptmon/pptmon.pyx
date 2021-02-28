@@ -2,14 +2,16 @@ from bcc import BPF
 from pyroute2 import IPRoute
 from ipaddress import IPv4Address
 from influxdb import InfluxDBClient
+from time import sleep
 import ctypes as ct
 import argparse
-import time
+
 import ast
 import threading
 
 from libc.stdint cimport uintptr_t
 from libc.stdio cimport printf
+from posix.time cimport clock_gettime, timespec, CLOCK_REALTIME
 
 # Default value
 cdef enum: _MAX_PPT_DATA = 1
@@ -31,7 +33,7 @@ data = []
 def send_to_influxdb():
     global data
     while not exit_flag.is_set():
-        time.sleep(idb_push_period)
+        sleep(idb_push_period)
 
         data_lock.acquire()
         data_copy = data
@@ -47,6 +49,9 @@ def ppt_event_handler(ctx, dat, size):
     global data_cnt, data
 
     ppt_data = <unsigned int*> (<uintptr_t> dat)
+    cdef timespec ts
+    clock_gettime(CLOCK_REALTIME, &ts)
+    cdef double cur_time = ts.tv_sec*1000000000 + ts.tv_nsec
 
     for i in range(0, _MAX_PPT_DATA):
         # network byte order
@@ -56,7 +61,7 @@ def ppt_event_handler(ctx, dat, size):
             data_cnt = data_cnt + 1
             if idb_client is not None:
                 data_lock.acquire()
-                data.append(u"%d value=%d" %(vnf_id, ppt_data[i] >> 8))
+                data.append(u"%d value=%d %d" %(vnf_id, ppt_data[i] >> 8, cur_time))
                 data_lock.release()
 
 def print_num_data_point():
@@ -196,7 +201,7 @@ def main():
                 bpf_mon.kprobe_poll()
         else:
             while True:
-                time.sleep(1)
+                sleep(1)
 
     except KeyboardInterrupt:
         pass
