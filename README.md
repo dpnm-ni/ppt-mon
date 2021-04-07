@@ -15,6 +15,8 @@ VNF Packet Processing Time Monitoring
 To get help on how to use PPTMon, run
 ```bash
 sudo python3 -m pptmon -h
+# example: monitor packet processing time of VNF with manual ID of 1, the network interface is ens4, monitoring period is 1000 ms
+sudo python3 -m pptmon -i ens4 -p 1000 --vnf-id 1
 ```
 
 ## Publication
