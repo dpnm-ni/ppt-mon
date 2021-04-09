@@ -63,10 +63,11 @@ def ppt_event_handler(ctx, dat, size):
                 data_lock.acquire()
                 data.append(u"%d value=%d %d" %(vnf_id, ppt_data[i] >> 8, cur_time))
                 data_lock.release()
+            else:
+                print(cur_time, ":\t", vnf_id, ppt_data[i] >> 8)
 
 def print_num_data_point():
     printf("number of data points: %u\n", data_cnt)
-    print(data)
 
 def set_tb_val(tb, key, val):
     k = tb.Key(key)
